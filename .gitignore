@@ -1,0 +1,39 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+.zig-cache/
+
+# Build directories
+build/
+dist/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test artifacts
+*.test
+test-results/
+
+# Local configuration
+*.local
+
+# Dependencies
+.zigmod/
+deps.zig
+
+# Coverage
+*.profdata
+*.profraw
+coverage/
+
+# Documentation build
+docs/site/
+
+# Temporary files
+*.tmp
+tmp/
