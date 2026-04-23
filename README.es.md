@@ -1,8 +1,8 @@
 # Z-Object
 
-Implementación de objetos compatible con ECMAScript de alto rendimiento en Zig 0.15
+Implementación de objetos compatible con ECMAScript de alto rendimiento en Zig 0.16
 
-[![Zig](https://img.shields.io/badge/zig-0.15.2-orange.svg)](https://ziglang.org/download/)
+[![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
 [![Tests](https://img.shields.io/badge/tests-113%20passing-brightgreen.svg)](https://github.com/yourusername/z-object)
 [![Licencia](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
 
@@ -354,4 +354,4 @@ Licencia MIT - ver archivo [LICENSE](LICENSE) para detalles
 
 ## Créditos
 
-Construido con ❤️ usando [Zig](https://ziglang.org/) 0.15.2
+Construido con ❤️ usando [Zig](https://ziglang.org/) 0.16.0

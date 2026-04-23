@@ -202,7 +202,7 @@ pub fn ZObject(comptime T: type) type {
 
         /// Object.keys() - Get array of enumerable property keys
         pub fn keys(self: *const Self, allocator: Allocator) ![][]const u8 {
-            var key_list: std.ArrayList([]const u8) = .{};
+            var key_list: std.ArrayList([]const u8) = .empty;
             errdefer key_list.deinit(allocator);
 
             var it = self.properties.iterator();
@@ -217,7 +217,7 @@ pub fn ZObject(comptime T: type) type {
 
         /// Object.values() - Get array of enumerable property values
         pub fn values(self: *const Self, allocator: Allocator) ![]T {
-            var value_list: std.ArrayList(T) = .{};
+            var value_list: std.ArrayList(T) = .empty;
             errdefer value_list.deinit(allocator);
 
             var it = self.properties.iterator();
@@ -245,7 +245,7 @@ pub fn ZObject(comptime T: type) type {
 
         /// Object.entries() - Get array of [key, value] pairs
         pub fn entries(self: *const Self, allocator: Allocator) ![]Entry {
-            var entry_list: std.ArrayList(Entry) = .{};
+            var entry_list: std.ArrayList(Entry) = .empty;
             errdefer entry_list.deinit(allocator);
 
             var it = self.properties.iterator();
@@ -359,7 +359,7 @@ pub fn ZObject(comptime T: type) type {
 
         /// Object.getOwnPropertyNames() - Get all property names (including non-enumerable)
         pub fn getOwnPropertyNames(self: *const Self, allocator: Allocator) ![][]const u8 {
-            var name_list: std.ArrayList([]const u8) = .{};
+            var name_list: std.ArrayList([]const u8) = .empty;
             errdefer name_list.deinit(allocator);
 
             var it = self.properties.keyIterator();
@@ -564,7 +564,7 @@ pub fn ZObject(comptime T: type) type {
             }
 
             // Convert to array
-            var prop_list: std.ArrayList([]const u8) = .{};
+            var prop_list: std.ArrayList([]const u8) = .empty;
             errdefer prop_list.deinit(allocator);
 
             var set_it = prop_set.keyIterator();
