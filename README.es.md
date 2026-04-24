@@ -26,7 +26,7 @@ const std = @import("std");
 const ZObject = @import("zobject").ZObject;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -34,12 +34,22 @@ pub fn main() !void {
     var obj = ZObject(i32).init(allocator);
     defer obj.deinit();
 
-    // Establecer propiedades
+    // Estabecer propiedades
     try obj.set("age", 25);
     try obj.set("score", 100);
+        
+    // Obtener propiedades
 
-    // Obtener propiedad
-    const age = obj.get("age"); // retorna ?i32
+    _ = obj.get("age") orelse {
+        std.debug.print("Dont exists age field\n", .{});
+        return;
+    };
+
+    if (obj.get("age")) |age| {
+        std.debug.print("{}\n", .{age});
+    } else {
+        std.debug.print("No encontrado\n", .{});
+    }
 
     // Object.keys()
     const keys_list = try obj.keys(allocator);
@@ -48,11 +58,11 @@ pub fn main() !void {
     // Object.freeze()
     obj.freeze();
 
-    // Esto fallará (objeto congelado)
+    // Esto fallará (objecto congelado)
     obj.set("newProp", 42) catch |err| {
         std.debug.print("Error: {}\n", .{err});
     };
-}
+}  
 ```
 
 ## Instalación
