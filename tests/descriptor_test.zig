@@ -210,7 +210,7 @@ test "getOwnPropertyDescriptors returns all descriptors" {
     try obj.set("b", 2);
 
     var descriptors = try obj.getOwnPropertyDescriptors(testing.allocator);
-    defer descriptors.deinit();
+    defer descriptors.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u32, 2), descriptors.count());
     try testing.expect(descriptors.contains("a"));

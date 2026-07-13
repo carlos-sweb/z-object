@@ -3,16 +3,16 @@
 High-performance ECMAScript-compatible object implementation in Zig 0.16
 
 [![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
-[![Tests](https://img.shields.io/badge/tests-113%20passing-brightgreen.svg)](https://github.com/yourusername/z-object)
+[![Tests](https://img.shields.io/badge/tests-125%20passing-brightgreen.svg)](https://github.com/yourusername/z-object)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Features
 
-- ✅ **100% ECMAScript Object API Compatible** - Fully compliant with ECMAScript specification
+- ✅ **Practical `Object.*` API coverage** for the homogeneous, statically-typed generic case — see [Design Limitations](#design-limitations) for what's out of scope (accessor properties/getters-setters are declared in `PropertyDescriptor` but not wired into any real getter/setter behavior; prototype objects are not reference-counted, their lifetime is the caller's responsibility)
 - ⚡ **High Performance** - Built on Zig's efficient HashMap implementation
 - 🔒 **Memory Safe** - Proper allocator management and RAII patterns
 - 🎯 **Type Generic** - Compile-time generics for any value type
-- 🧪 **Comprehensive Test Suite** - 113+ tests covering all functionality
+- 🧪 **Comprehensive Test Suite** - 125+ tests covering all functionality
 - 🎨 **Elegant Control Flow** - Labeled blocks for clear intent
 - 📦 **Property Descriptors Support** - Full support for writable, enumerable, configurable
 - 🔗 **Prototype Chain Implementation** - Complete prototype inheritance
@@ -110,13 +110,17 @@ exe.root_module.addImport("zobject", zobject_dep.module("zobject"));
 | `isFrozen()` | `Object.isFrozen()` | Check if frozen |
 | `isSealed()` | `Object.isSealed()` | Check if sealed |
 | `isExtensible()` | `Object.isExtensible()` | Check if extensible |
+| `hasOwn(key)` | `Object.hasOwn()` (ES2022) | Alias of `hasOwnProperty(key)` |
+| `is(FT, a, b)` | `Object.is()` | SameValue algorithm — differs from `==` only for float `+0`/`-0` and `NaN` |
+| `createWithProperties(allocator, proto, props)` | `Object.create(proto, propertiesObject)` | Like `create()`, but also defines properties in the same call |
 
 ### Instance Methods
 
 | Method | Description |
 |--------|-------------|
 | `set(key, value)` | Set property value |
-| `get(key)` | Get property value (returns `?T`) |
+| `get(key)` | Get property value — own properties, then the prototype chain (ECMA-262 `[[Get]]`); not gated by enumerability |
+| `getOwn(key)` | Get property value, own properties only, no prototype chain walk |
 | `delete(key)` | Delete property |
 | `has(key)` | Check if property exists (includes prototype) |
 | `hasOwnProperty(key)` | Check if own property exists |
@@ -124,6 +128,7 @@ exe.root_module.addImport("zobject", zobject_dep.module("zobject"));
 | `clear()` | Remove all properties |
 | `propertyIsEnumerable(key)` | Check if property is enumerable |
 | `toString()` | Get string representation |
+| `toLocaleString()` | Alias of `toString()` (no real locale database, same as z-array/z-number) |
 | `valueOf()` | Get primitive value |
 | `isPrototypeOf(other)` | Check prototype relationship |
 
@@ -269,6 +274,21 @@ try obj3.set("existing", 200); // OK
 obj3.set("new", 300) catch {}; // Error: ObjectNotExtensible
 try obj3.delete("existing"); // OK (still configurable)
 ```
+
+## Design Limitations
+
+- **Accessor properties (getters/setters) are not implemented.** `PropertyDescriptor` declares `get`/`set`/`value` fields, but nothing in `ZObject` ever wires them into real getter/setter behavior — every property here is a data property. `defineProperty`'s validation of "data vs. accessor descriptor" is effectively a no-op today given that.
+- **`prototype: ?*Self` is not reference-counted or otherwise lifetime-managed.** Setting an object as another's prototype does not extend its lifetime; the caller must ensure the prototype outlives every object that points to it. (If you're consuming `ZObject` through [z-value](https://github.com/carlos-sweb/z-value)'s `JSValue`, this is documented there too as a known gap.)
+- **`get(key)`/`getOwn(key)`/iteration methods never filter by `writable`/`configurable`** — only `enumerable` gates iteration (`keys`/`values`/`entries`/`forEach`/`map`/`filter`/`reduce`/`some`/`every`/`find`), matching ECMA-262; `get`/`getOwn` never filter by any descriptor flag, also matching spec.
+- **`forEach`/`reduce`/`some`/`every`/`find` don't return an error union**, but now need a small scratch allocation to compute enumeration order. An allocation failure there is silently treated as "nothing to iterate" (`forEach` returns without calling the callback, `reduce` returns the untouched initial accumulator, `some`/`find` report no match, `every` reports true) rather than propagated — acceptable for the tiny, bounded allocation involved (proportional to the object's own property count), but worth knowing if you're auditing OOM-handling paths.
+
+### Enumeration order (ECMA-262 OrdinaryOwnPropertyKeys)
+
+`keys()`, `values()`, `entries()`, `getOwnPropertyNames()`, `getOwnPropertyDescriptors()`, `forEach`, `map`, `filter`, `reduce`, `some`, `every`, `find`, and `assign()`'s source traversal now enumerate properties in the order the spec requires: array-index keys (canonical non-negative integer strings, no leading zeros, ≤ 2^32-2) first in ascending numeric order, then the rest of the string keys in insertion order. This used to follow `std.StringHashMap`'s internal bucket order (neither insertion order nor spec order, and not stable across builds) — fixed by switching the internal storage to an array-backed map (`std.array_hash_map.String`). `getAllPropertiesInChain()` is a non-spec convenience utility and still doesn't guarantee a specific order.
+
+### Breaking change note
+
+`get(key)` now walks the prototype chain (previously it only checked own properties, despite its doc comment already claiming otherwise) — this matches real ECMAScript `[[Get]]` semantics (`obj.prop` always includes inherited properties). Code that relied on the old own-properties-only behavior should switch to the new `getOwn(key)`.
 
 ## Building and Testing
 

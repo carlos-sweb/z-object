@@ -316,9 +316,12 @@ test "prototype chain with non-enumerable properties" {
     defer obj.deinit();
     try obj.setPrototype(&proto);
 
-    // lookupInChain only finds enumerable properties
+    // ECMA-262 [[Get]] is not gated by enumerability — only iteration
+    // (Object.keys/values/entries/for-in) is. A non-enumerable inherited
+    // property must still be found by direct access.
     const value = obj.lookupInChain("hidden");
-    try testing.expectEqual(@as(?i32, null), value);
+    try testing.expectEqual(@as(?i32, 99), value);
+    try testing.expectEqual(@as(?i32, 99), obj.get("hidden"));
 }
 
 test "Object.getPrototypeOf" {
@@ -365,4 +368,41 @@ test "complex prototype chain navigation" {
     try testing.expect(level1.isPrototypeOf(&level3));
     try testing.expect(level2.isPrototypeOf(&level3));
     try testing.expect(!level3.isPrototypeOf(&level0));
+}
+
+test "get() finds inherited properties (regression: used to be own-only)" {
+    var proto = ZObject(i32).init(testing.allocator);
+    defer proto.deinit();
+    try proto.set("inherited", 42);
+
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+    try obj.setPrototype(&proto);
+
+    try testing.expectEqual(@as(?i32, 42), obj.get("inherited"));
+}
+
+test "getOwn() does not find inherited properties, unlike get()" {
+    var proto = ZObject(i32).init(testing.allocator);
+    defer proto.deinit();
+    try proto.set("inherited", 42);
+
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+    try obj.setPrototype(&proto);
+    try obj.set("own", 7);
+
+    try testing.expectEqual(@as(?i32, null), obj.getOwn("inherited"));
+    try testing.expectEqual(@as(?i32, 42), obj.get("inherited"));
+    try testing.expectEqual(@as(?i32, 7), obj.getOwn("own"));
+    try testing.expectEqual(@as(?i32, 7), obj.get("own"));
+}
+
+test "get()/getOwn() work with slice-typed T (ZObject([]const u8))" {
+    var obj = ZObject([]const u8).init(testing.allocator);
+    defer obj.deinit();
+
+    try obj.set("name", "carlos");
+    try testing.expectEqualStrings("carlos", obj.get("name").?);
+    try testing.expectEqualStrings("carlos", obj.getOwn("name").?);
 }

@@ -3,16 +3,16 @@
 Implementación de objetos compatible con ECMAScript de alto rendimiento en Zig 0.16
 
 [![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
-[![Tests](https://img.shields.io/badge/tests-113%20passing-brightgreen.svg)](https://github.com/yourusername/z-object)
+[![Tests](https://img.shields.io/badge/tests-125%20passing-brightgreen.svg)](https://github.com/yourusername/z-object)
 [![Licencia](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
 
 ## Características
 
-- ✅ **100% Compatible con API de Object de ECMAScript** - Totalmente conforme con la especificación ECMAScript
+- ✅ **Cobertura práctica de la API `Object.*`** para el caso genérico homogéneo de tipado estático — ver [Limitaciones de Diseño](#limitaciones-de-diseño) para lo que queda fuera de alcance (las accessor properties/getters-setters están declaradas en `PropertyDescriptor` pero no conectadas a ninguna lógica real de getter/setter; los objetos prototipo no tienen conteo de referencias, su lifetime es responsabilidad del caller)
 - ⚡ **Alto Rendimiento** - Construido sobre la eficiente implementación HashMap de Zig
 - 🔒 **Seguro en Memoria** - Gestión adecuada de allocators y patrones RAII
 - 🎯 **Genérico en Tipos** - Genéricos en tiempo de compilación para cualquier tipo de valor
-- 🧪 **Suite de Pruebas Comprehensiva** - 113+ pruebas cubriendo toda la funcionalidad
+- 🧪 **Suite de Pruebas Comprehensiva** - 117+ pruebas cubriendo toda la funcionalidad
 - 🎨 **Flujo de Control Elegante** - Bloques etiquetados para intención clara
 - 📦 **Soporte de Property Descriptors** - Soporte completo para writable, enumerable, configurable
 - 🔗 **Implementación de Cadena de Prototipos** - Herencia de prototipos completa
@@ -110,13 +110,17 @@ exe.root_module.addImport("zobject", zobject_dep.module("zobject"));
 | `isFrozen()` | `Object.isFrozen()` | Verificar si está congelado |
 | `isSealed()` | `Object.isSealed()` | Verificar si está sellado |
 | `isExtensible()` | `Object.isExtensible()` | Verificar si es extensible |
+| `hasOwn(key)` | `Object.hasOwn()` (ES2022) | Alias de `hasOwnProperty(key)` |
+| `is(FT, a, b)` | `Object.is()` | Algoritmo SameValue — difiere de `==` solo para `+0`/`-0` y `NaN` en floats |
+| `createWithProperties(allocator, proto, props)` | `Object.create(proto, propertiesObject)` | Como `create()`, pero además define propiedades en la misma llamada |
 
 ### Métodos de Instancia
 
 | Método | Descripción |
 |--------|-------------|
 | `set(key, value)` | Establecer valor de propiedad |
-| `get(key)` | Obtener valor de propiedad (retorna `?T`) |
+| `get(key)` | Obtener valor de propiedad — propiedades propias, luego la cadena de prototipos (`[[Get]]` de ECMA-262); no se filtra por enumerabilidad |
+| `getOwn(key)` | Obtener valor de propiedad, solo propiedades propias, sin recorrer la cadena de prototipos |
 | `delete(key)` | Eliminar propiedad |
 | `has(key)` | Verificar si existe propiedad (incluye prototipo) |
 | `hasOwnProperty(key)` | Verificar si existe propiedad propia |
@@ -124,6 +128,7 @@ exe.root_module.addImport("zobject", zobject_dep.module("zobject"));
 | `clear()` | Remover todas las propiedades |
 | `propertyIsEnumerable(key)` | Verificar si propiedad es enumerable |
 | `toString()` | Obtener representación en string |
+| `toLocaleString()` | Alias de `toString()` (sin base de datos de locales real, igual que z-array/z-number) |
 | `valueOf()` | Obtener valor primitivo |
 | `isPrototypeOf(other)` | Verificar relación de prototipo |
 
@@ -269,6 +274,21 @@ try obj3.set("existing", 200); // OK
 obj3.set("new", 300) catch {}; // Error: ObjectNotExtensible
 try obj3.delete("existing"); // OK (aún configurable)
 ```
+
+## Limitaciones de Diseño
+
+- **Las accessor properties (getters/setters) no están implementadas.** `PropertyDescriptor` declara los campos `get`/`set`/`value`, pero nada en `ZObject` los conecta a un comportamiento real de getter/setter — toda propiedad acá es una data property. La validación de "data vs. accessor descriptor" de `defineProperty` es efectivamente un no-op dado esto.
+- **`prototype: ?*Self` no tiene conteo de referencias ni gestión de lifetime.** Establecer un objeto como prototipo de otro no extiende su lifetime; el caller debe asegurarse de que el prototipo sobreviva a cada objeto que lo referencia. (Si consumís `ZObject` a través de `JSValue` de [z-value](https://github.com/carlos-sweb/z-value), este gap también está documentado ahí.)
+- **`get(key)`/`getOwn(key)`/los métodos de iteración nunca filtran por `writable`/`configurable`** — solo `enumerable` filtra la iteración (`keys`/`values`/`entries`/`forEach`/`map`/`filter`/`reduce`/`some`/`every`/`find`), igualando a ECMA-262; `get`/`getOwn` no filtran por ningún flag de descriptor, también igualando al spec.
+- **`forEach`/`reduce`/`some`/`every`/`find` no retornan union de error**, pero ahora necesitan una asignación chica de scratch para calcular el orden de enumeración. Un fallo de asignación ahí se trata silenciosamente como "nada que iterar" (`forEach` retorna sin llamar al callback, `reduce` retorna el acumulador inicial sin tocar, `some`/`find` reportan sin coincidencia, `every` reporta true) en vez de propagarse — aceptable para la asignación chica y acotada involucrada (proporcional a la cantidad de propiedades propias del objeto), pero vale saberlo si estás auditando rutas de manejo de OOM.
+
+### Orden de enumeración (OrdinaryOwnPropertyKeys de ECMA-262)
+
+`keys()`, `values()`, `entries()`, `getOwnPropertyNames()`, `getOwnPropertyDescriptors()`, `forEach`, `map`, `filter`, `reduce`, `some`, `every`, `find`, y el recorrido de la fuente en `assign()` ahora enumeran propiedades en el orden que exige el spec: claves array-index (strings de enteros no negativos canónicos, sin ceros a la izquierda, ≤ 2^32-2) primero en orden numérico ascendente, después el resto de las claves string en orden de inserción. Antes seguía el orden de buckets internos de `std.StringHashMap` (ni orden de inserción ni el del spec, y no estable entre builds) — arreglado cambiando el storage interno a un mapa array-backed (`std.array_hash_map.String`). `getAllPropertiesInChain()` es una utilidad de conveniencia que no corresponde a ningún método real del spec y todavía no garantiza un orden específico.
+
+### Nota de breaking change
+
+`get(key)` ahora camina la cadena de prototipos (antes solo verificaba propiedades propias, pese a que su propio doc-comment ya afirmaba lo contrario) — esto iguala la semántica real de `[[Get]]` de ECMAScript (`obj.prop` siempre incluye propiedades heredadas). El código que dependía del comportamiento viejo (solo propiedades propias) debe cambiar a usar el nuevo `getOwn(key)`.
 
 ## Compilación y Pruebas
 

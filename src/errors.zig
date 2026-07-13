@@ -20,14 +20,7 @@ pub const ErrorContext = struct {
     message: []const u8,
     property: ?[]const u8 = null,
 
-    pub fn format(
-        self: ErrorContext,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+    pub fn format(self: ErrorContext, writer: *std.Io.Writer) !void {
         try writer.print("ZObjectError: {s}", .{self.message});
         if (self.property) |prop| {
             try writer.print(" (property: {s})", .{prop});

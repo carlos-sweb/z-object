@@ -231,3 +231,17 @@ test "object starts as extensible" {
     try testing.expect(!obj.isSealed());
     try testing.expect(!obj.isFrozen());
 }
+
+test "ErrorContext.format produces the expected message (regression: used to fail to compile)" {
+    const ErrorContext = @import("zobject").ErrorContext;
+
+    const ctx = ErrorContext{ .message = "test error", .property = "age" };
+    const s = try std.fmt.allocPrint(testing.allocator, "{f}", .{ctx});
+    defer testing.allocator.free(s);
+    try testing.expectEqualStrings("ZObjectError: test error (property: age)", s);
+
+    const ctx_no_prop = ErrorContext{ .message = "generic error" };
+    const s2 = try std.fmt.allocPrint(testing.allocator, "{f}", .{ctx_no_prop});
+    defer testing.allocator.free(s2);
+    try testing.expectEqualStrings("ZObjectError: generic error", s2);
+}

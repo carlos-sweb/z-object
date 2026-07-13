@@ -8,8 +8,11 @@ pub fn ZObject(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        /// Map of properties (string -> Property)
-        properties: std.StringHashMap(property_mod.Property(T)),
+        /// Map of properties (string -> Property). Array-backed (not a plain
+        /// hashmap) so that iteration order is insertion order, matching
+        /// ECMA-262 OrdinaryOwnPropertyKeys — see enumerationOrder() for the
+        /// additional array-index-keys-first partitioning applied on top.
+        properties: std.array_hash_map.String(property_mod.Property(T)),
 
         /// Prototype chain (can be null)
         prototype: ?*Self,
@@ -25,7 +28,7 @@ pub fn ZObject(comptime T: type) type {
         /// Initialize a new ZObject
         pub fn init(allocator: Allocator) Self {
             return .{
-                .properties = std.StringHashMap(property_mod.Property(T)).init(allocator),
+                .properties = .empty,
                 .prototype = null,
                 .allocator = allocator,
                 .is_frozen = false,
@@ -41,7 +44,48 @@ pub fn ZObject(comptime T: type) type {
             while (it.next()) |entry| {
                 self.allocator.free(entry.key_ptr.*);
             }
-            self.properties.deinit();
+            self.properties.deinit(self.allocator);
+        }
+
+        /// ECMA-262 CanonicalNumericIndexString / array-index test: no sign,
+        /// no leading zeros (except "0" itself), value <= 2^32-2 (2^32-1 is
+        /// reserved by spec as an "invalid index" sentinel).
+        fn arrayIndexValue(key: []const u8) ?u32 {
+            if (key.len == 0) return null;
+            if (key.len > 1 and key[0] == '0') return null;
+            var value: u32 = 0;
+            for (key) |c| {
+                if (c < '0' or c > '9') return null;
+                const digit: u32 = c - '0';
+                if (value > (std.math.maxInt(u32) - digit) / 10) return null;
+                value = value * 10 + digit;
+            }
+            if (value == std.math.maxInt(u32)) return null;
+            return value;
+        }
+
+        /// Indices into self.properties.keys()/.values() in the enumeration
+        /// order required by OrdinaryOwnPropertyKeys: array-index keys
+        /// ascending numerically first, then the rest in their relative
+        /// (insertion) order. Caller owns the returned slice.
+        fn enumerationOrder(self: *const Self, allocator: Allocator) ![]usize {
+            const ks = self.properties.keys();
+            const idx = try allocator.alloc(usize, ks.len);
+            for (idx, 0..) |*v, i| v.* = i;
+
+            const Ctx = struct {
+                keys: [][]const u8,
+                pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                    const ai = arrayIndexValue(ctx.keys[a]);
+                    const bi = arrayIndexValue(ctx.keys[b]);
+                    if (ai != null and bi != null) return ai.? < bi.?;
+                    if (ai != null) return true;
+                    if (bi != null) return false;
+                    return false; // neither is an index: preserve order (stable sort)
+                }
+            };
+            std.mem.sort(usize, idx, Ctx{ .keys = ks }, Ctx.lessThan);
+            return idx;
         }
 
         // ===== Instance Methods =====
@@ -78,12 +122,22 @@ pub fn ZObject(comptime T: type) type {
                 const key_copy = try self.allocator.dupe(u8, key);
                 errdefer self.allocator.free(key_copy);
 
-                try self.properties.put(key_copy, property_mod.Property(T).init(value));
+                try self.properties.put(self.allocator, key_copy, property_mod.Property(T).init(value));
             }
         }
 
-        /// Get property with prototype chain lookup
+        /// Object [[Get]] - own properties first, then walks the prototype
+        /// chain. Matches real ECMAScript property access (obj.prop):
+        /// enumerability never gates this, only iteration methods
+        /// (keys/values/entries/forEach) do.
         pub fn get(self: *const Self, key: []const u8) ?T {
+            return self.lookupInChain(key);
+        }
+
+        /// Own-property-only lookup, no prototype chain walk. Use this when
+        /// you explicitly need "does *this* object (not its prototype) have
+        /// the value", e.g. implementing hasOwnProperty-adjacent logic.
+        pub fn getOwn(self: *const Self, key: []const u8) ?T {
             if (self.properties.get(key)) |prop| {
                 return prop.value;
             }
@@ -111,8 +165,9 @@ pub fn ZObject(comptime T: type) type {
                 break :deleter;
             }
 
-            // Remove and free key
-            if (self.properties.fetchRemove(key)) |removed| {
+            // Remove and free key (ordered: preserves the relative order of
+            // surviving properties, per OrdinaryOwnPropertyKeys).
+            if (self.properties.fetchOrderedRemove(key)) |removed| {
                 self.allocator.free(removed.key);
                 return true;
             }
@@ -181,9 +236,32 @@ pub fn ZObject(comptime T: type) type {
             return try allocator.dupe(u8, "[object Object]");
         }
 
+        /// Object.prototype.toLocaleString() - no real locale database
+        /// exists here (same as z-array/z-number), so this is an alias of
+        /// toString().
+        pub fn toLocaleString(self: *const Self, allocator: Allocator) ![]u8 {
+            return self.toString(allocator);
+        }
+
         /// Get primitive value
         pub fn valueOf(self: *const Self) *const Self {
             return self;
+        }
+
+        /// Object.hasOwn() (ES2022) - alias of hasOwnProperty.
+        pub fn hasOwn(self: *const Self, key: []const u8) bool {
+            return self.hasOwnProperty(key);
+        }
+
+        /// Object.is() - SameValue algorithm. Differs from SameValueZero
+        /// only in that +0 is -0 is false (SameValueZero treats them equal).
+        /// Only observable for float T; for every other type this matches
+        /// plain ==/eql.
+        pub fn is(comptime FT: type, a: FT, b: FT) bool {
+            if (@typeInfo(FT) != .float) return a == b;
+            if (std.math.isNan(a) and std.math.isNan(b)) return true;
+            if (a == 0 and b == 0) return std.math.signbit(a) == std.math.signbit(b);
+            return a == b;
         }
 
         /// Check if this object is prototype of another
@@ -202,28 +280,36 @@ pub fn ZObject(comptime T: type) type {
 
         /// Object.keys() - Get array of enumerable property keys
         pub fn keys(self: *const Self, allocator: Allocator) ![][]const u8 {
+            const order = try self.enumerationOrder(allocator);
+            defer allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
             var key_list: std.ArrayList([]const u8) = .empty;
             errdefer key_list.deinit(allocator);
 
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    try key_list.append(allocator, entry.key_ptr.*);
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    try key_list.append(allocator, ks[i]);
                 }
             }
 
             return try key_list.toOwnedSlice(allocator);
         }
 
-        /// Object.values() - Get array of enumerable property values
+        /// Object.values() - Get array of enumerable property values, in
+        /// ECMA-262 OrdinaryOwnPropertyKeys order.
         pub fn values(self: *const Self, allocator: Allocator) ![]T {
+            const order = try self.enumerationOrder(allocator);
+            defer allocator.free(order);
+
+            const vs = self.properties.values();
             var value_list: std.ArrayList(T) = .empty;
             errdefer value_list.deinit(allocator);
 
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    try value_list.append(allocator, entry.value_ptr.value);
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    try value_list.append(allocator, vs[i].value);
                 }
             }
 
@@ -243,17 +329,22 @@ pub fn ZObject(comptime T: type) type {
             descriptor: property_mod.PropertyDescriptor,
         };
 
-        /// Object.entries() - Get array of [key, value] pairs
+        /// Object.entries() - Get array of [key, value] pairs, in ECMA-262
+        /// OrdinaryOwnPropertyKeys order.
         pub fn entries(self: *const Self, allocator: Allocator) ![]Entry {
+            const order = try self.enumerationOrder(allocator);
+            defer allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
             var entry_list: std.ArrayList(Entry) = .empty;
             errdefer entry_list.deinit(allocator);
 
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
                     try entry_list.append(allocator, .{
-                        .key = entry.key_ptr.*,
-                        .value = entry.value_ptr.value,
+                        .key = ks[i],
+                        .value = vs[i].value,
                     });
                 }
             }
@@ -269,12 +360,16 @@ pub fn ZObject(comptime T: type) type {
                         return errors_mod.ZObjectError.ObjectIsFrozen;
                     }
 
-                    var it = source.properties.iterator();
-                    while (it.next()) |entry| {
-                        if (!entry.value_ptr.descriptor.enumerable) continue;
+                    const order = try source.enumerationOrder(target.allocator);
+                    defer target.allocator.free(order);
+
+                    const ks = source.properties.keys();
+                    const vs = source.properties.values();
+                    for (order) |i| {
+                        if (!vs[i].descriptor.enumerable) continue;
 
                         // Set property on target
-                        try target.set(entry.key_ptr.*, entry.value_ptr.value);
+                        try target.set(ks[i], vs[i].value);
                     }
 
                     break :assigner;
@@ -289,6 +384,16 @@ pub fn ZObject(comptime T: type) type {
             return obj;
         }
 
+        /// Object.create(proto, propertiesObject) - like create(), but also
+        /// defines properties in the same call, without changing create()'s
+        /// existing signature.
+        pub fn createWithProperties(allocator: Allocator, proto: ?*Self, props: []const PropertyDefinition) !Self {
+            var obj = try Self.create(allocator, proto);
+            errdefer obj.deinit();
+            try obj.defineProperties(props);
+            return obj;
+        }
+
         /// Object.freeze() - Freeze object (labeled block example 5)
         pub fn freeze(self: *Self) void {
             freezer: {
@@ -296,8 +401,7 @@ pub fn ZObject(comptime T: type) type {
                 self.is_sealed = true;
                 self.is_extensible = false;
 
-                var it = self.properties.valueIterator();
-                while (it.next()) |prop| {
+                for (self.properties.values()) |*prop| {
                     prop.descriptor.writable = false;
                     prop.descriptor.configurable = false;
                 }
@@ -311,8 +415,7 @@ pub fn ZObject(comptime T: type) type {
             self.is_sealed = true;
             self.is_extensible = false;
 
-            var it = self.properties.valueIterator();
-            while (it.next()) |prop| {
+            for (self.properties.values()) |*prop| {
                 prop.descriptor.configurable = false;
             }
         }
@@ -327,8 +430,7 @@ pub fn ZObject(comptime T: type) type {
             if (!self.is_frozen) return false;
 
             // All properties must be non-writable and non-configurable
-            var it = self.properties.valueIterator();
-            while (it.next()) |prop| {
+            for (self.properties.values()) |prop| {
                 if (prop.descriptor.writable or prop.descriptor.configurable) {
                     return false;
                 }
@@ -342,8 +444,7 @@ pub fn ZObject(comptime T: type) type {
             if (!self.is_sealed or self.is_extensible) return false;
 
             // All properties must be non-configurable
-            var it = self.properties.valueIterator();
-            while (it.next()) |prop| {
+            for (self.properties.values()) |prop| {
                 if (prop.descriptor.configurable) {
                     return false;
                 }
@@ -357,17 +458,18 @@ pub fn ZObject(comptime T: type) type {
             return self.is_extensible;
         }
 
-        /// Object.getOwnPropertyNames() - Get all property names (including non-enumerable)
+        /// Object.getOwnPropertyNames() - Get all property names (including
+        /// non-enumerable), in ECMA-262 OrdinaryOwnPropertyKeys order.
         pub fn getOwnPropertyNames(self: *const Self, allocator: Allocator) ![][]const u8 {
-            var name_list: std.ArrayList([]const u8) = .empty;
-            errdefer name_list.deinit(allocator);
+            const order = try self.enumerationOrder(allocator);
+            defer allocator.free(order);
 
-            var it = self.properties.keyIterator();
-            while (it.next()) |key| {
-                try name_list.append(allocator, key.*);
-            }
+            const ks = self.properties.keys();
+            const name_list = try allocator.alloc([]const u8, order.len);
+            errdefer allocator.free(name_list);
+            for (order, 0..) |i, out_i| name_list[out_i] = ks[i];
 
-            return try name_list.toOwnedSlice(allocator);
+            return name_list;
         }
 
         /// Object.fromEntries() - Create object from entries
@@ -418,7 +520,7 @@ pub fn ZObject(comptime T: type) type {
                 const key_copy = try self.allocator.dupe(u8, key);
                 errdefer self.allocator.free(key_copy);
 
-                try self.properties.put(key_copy, property_mod.Property(T).initWithDescriptor(value, descriptor));
+                try self.properties.put(self.allocator, key_copy, property_mod.Property(T).initWithDescriptor(value, descriptor));
             }
         }
 
@@ -443,17 +545,22 @@ pub fn ZObject(comptime T: type) type {
             return null;
         }
 
-        /// Object.getOwnPropertyDescriptors()
+        /// Object.getOwnPropertyDescriptors() - result preserves ECMA-262
+        /// OrdinaryOwnPropertyKeys order, like the object itself.
         pub fn getOwnPropertyDescriptors(
             self: *const Self,
             allocator: Allocator,
-        ) !std.StringHashMap(property_mod.PropertyDescriptor) {
-            var desc_map = std.StringHashMap(property_mod.PropertyDescriptor).init(allocator);
-            errdefer desc_map.deinit();
+        ) !std.array_hash_map.String(property_mod.PropertyDescriptor) {
+            const order = try self.enumerationOrder(allocator);
+            defer allocator.free(order);
 
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                try desc_map.put(entry.key_ptr.*, entry.value_ptr.descriptor);
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
+            var desc_map: std.array_hash_map.String(property_mod.PropertyDescriptor) = .empty;
+            errdefer desc_map.deinit(allocator);
+
+            for (order) |i| {
+                try desc_map.put(allocator, ks[i], vs[i].descriptor);
             }
 
             return desc_map;
@@ -508,16 +615,17 @@ pub fn ZObject(comptime T: type) type {
             return self.prototype;
         }
 
-        /// Lookup property in prototype chain (labeled block example 7)
+        /// Lookup property in own properties or the prototype chain
+        /// (labeled block example 7). Per ECMA-262 [[Get]], enumerability
+        /// never gates this — only iteration (keys/values/entries/forEach)
+        /// filters by it.
         pub fn lookupInChain(self: *const Self, key: []const u8) ?T {
             var current: ?*const Self = self;
 
             chain_walker: {
                 while (current) |obj| {
                     if (obj.properties.get(key)) |prop| {
-                        if (prop.descriptor.enumerable) {
-                            return prop.value;
-                        }
+                        return prop.value;
                     }
                     current = obj.prototype;
                 }
@@ -548,17 +656,15 @@ pub fn ZObject(comptime T: type) type {
             defer prop_set.deinit();
 
             // Add own properties
-            var it = self.properties.keyIterator();
-            while (it.next()) |key| {
-                try prop_set.put(key.*, {});
+            for (self.properties.keys()) |key| {
+                try prop_set.put(key, {});
             }
 
             // Add prototype chain properties
             var current = self.prototype;
             while (current) |proto| {
-                var proto_it = proto.properties.keyIterator();
-                while (proto_it.next()) |key| {
-                    try prop_set.put(key.*, {});
+                for (proto.properties.keys()) |key| {
+                    try prop_set.put(key, {});
                 }
                 current = proto.prototype;
             }
@@ -577,21 +683,29 @@ pub fn ZObject(comptime T: type) type {
 
         // ===== Iteration Methods =====
 
-        /// forEach over enumerable properties
+        /// forEach over enumerable properties, in ECMA-262
+        /// OrdinaryOwnPropertyKeys order.
         pub fn forEach(
             self: *const Self,
             context: anytype,
             comptime callback: fn (@TypeOf(context), []const u8, T) void,
         ) void {
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    callback(context, entry.key_ptr.*, entry.value_ptr.value);
+            // forEach has no error return; an OOM on this tiny scratch
+            // allocation is treated as "nothing to iterate" rather than propagated.
+            const order = self.enumerationOrder(self.allocator) catch return;
+            defer self.allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    callback(context, ks[i], vs[i].value);
                 }
             }
         }
 
-        /// map over properties (returns new object)
+        /// map over properties (returns new object), in ECMA-262
+        /// OrdinaryOwnPropertyKeys order.
         pub fn map(
             self: *const Self,
             comptime U: type,
@@ -601,18 +715,22 @@ pub fn ZObject(comptime T: type) type {
             var result = ZObject(U).init(self.allocator);
             errdefer result.deinit();
 
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    const new_value = callback(context, entry.key_ptr.*, entry.value_ptr.value);
-                    try result.set(entry.key_ptr.*, new_value);
+            const order = try self.enumerationOrder(self.allocator);
+            defer self.allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    const new_value = callback(context, ks[i], vs[i].value);
+                    try result.set(ks[i], new_value);
                 }
             }
 
             return result;
         }
 
-        /// filter properties
+        /// filter properties, in ECMA-262 OrdinaryOwnPropertyKeys order.
         pub fn filter(
             self: *const Self,
             context: anytype,
@@ -621,11 +739,15 @@ pub fn ZObject(comptime T: type) type {
             var result = Self.init(self.allocator);
             errdefer result.deinit();
 
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    if (predicate(context, entry.key_ptr.*, entry.value_ptr.value)) {
-                        try result.set(entry.key_ptr.*, entry.value_ptr.value);
+            const order = try self.enumerationOrder(self.allocator);
+            defer self.allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    if (predicate(context, ks[i], vs[i].value)) {
+                        try result.set(ks[i], vs[i].value);
                     }
                 }
             }
@@ -633,7 +755,7 @@ pub fn ZObject(comptime T: type) type {
             return result;
         }
 
-        /// reduce over properties
+        /// reduce over properties, in ECMA-262 OrdinaryOwnPropertyKeys order.
         pub fn reduce(
             self: *const Self,
             comptime U: type,
@@ -643,26 +765,39 @@ pub fn ZObject(comptime T: type) type {
         ) U {
             var accumulator = initial;
 
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    accumulator = callback(context, accumulator, entry.key_ptr.*, entry.value_ptr.value);
+            // reduce has no error return; OOM on the scratch allocation falls back
+            // to the untouched initial accumulator rather than propagating.
+            const order = self.enumerationOrder(self.allocator) catch return accumulator;
+            defer self.allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    accumulator = callback(context, accumulator, ks[i], vs[i].value);
                 }
             }
 
             return accumulator;
         }
 
-        /// some - at least one property satisfies predicate
+        /// some - at least one property satisfies predicate, checked in
+        /// ECMA-262 OrdinaryOwnPropertyKeys order.
         pub fn some(
             self: *const Self,
             context: anytype,
             comptime predicate: fn (@TypeOf(context), []const u8, T) bool,
         ) bool {
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    if (predicate(context, entry.key_ptr.*, entry.value_ptr.value)) {
+            // some has no error return; OOM on the scratch allocation is treated
+            // as "no match" rather than propagated.
+            const order = self.enumerationOrder(self.allocator) catch return false;
+            defer self.allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    if (predicate(context, ks[i], vs[i].value)) {
                         return true;
                     }
                 }
@@ -670,16 +805,24 @@ pub fn ZObject(comptime T: type) type {
             return false;
         }
 
-        /// every - all properties satisfy predicate
+        /// every - all properties satisfy predicate, checked in ECMA-262
+        /// OrdinaryOwnPropertyKeys order.
         pub fn every(
             self: *const Self,
             context: anytype,
             comptime predicate: fn (@TypeOf(context), []const u8, T) bool,
         ) bool {
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    if (!predicate(context, entry.key_ptr.*, entry.value_ptr.value)) {
+            // every has no error return; OOM on the scratch allocation is treated
+            // as vacuously true rather than propagated (matches every()'s own
+            // empty-collection convention).
+            const order = self.enumerationOrder(self.allocator) catch return true;
+            defer self.allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    if (!predicate(context, ks[i], vs[i].value)) {
                         return false;
                     }
                 }
@@ -687,19 +830,25 @@ pub fn ZObject(comptime T: type) type {
             return true;
         }
 
-        /// find property
+        /// find property, in ECMA-262 OrdinaryOwnPropertyKeys order.
         pub fn find(
             self: *const Self,
             context: anytype,
             comptime predicate: fn (@TypeOf(context), []const u8, T) bool,
         ) ?struct { key: []const u8, value: T } {
-            var it = self.properties.iterator();
-            while (it.next()) |entry| {
-                if (entry.value_ptr.descriptor.enumerable) {
-                    if (predicate(context, entry.key_ptr.*, entry.value_ptr.value)) {
+            // find has no error return; OOM on the scratch allocation is treated
+            // as "not found" rather than propagated.
+            const order = self.enumerationOrder(self.allocator) catch return null;
+            defer self.allocator.free(order);
+
+            const ks = self.properties.keys();
+            const vs = self.properties.values();
+            for (order) |i| {
+                if (vs[i].descriptor.enumerable) {
+                    if (predicate(context, ks[i], vs[i].value)) {
                         return .{
-                            .key = entry.key_ptr.*,
-                            .value = entry.value_ptr.value,
+                            .key = ks[i],
+                            .value = vs[i].value,
                         };
                     }
                 }
@@ -737,6 +886,7 @@ pub fn ZObject(comptime T: type) type {
 pub const PropertyDescriptor = @import("property.zig").PropertyDescriptor;
 pub const Property = @import("property.zig").Property;
 pub const ZObjectError = @import("errors.zig").ZObjectError;
+pub const ErrorContext = @import("errors.zig").ErrorContext;
 
 test "basic ZObject usage" {
     const testing = std.testing;

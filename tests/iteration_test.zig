@@ -516,3 +516,139 @@ test "chaining iteration methods" {
     try testing.expectEqual(@as(?i32, 4), mapped.get("b"));
     try testing.expectEqual(@as(?i32, 8), mapped.get("d"));
 }
+
+test "keys() preserves insertion order (regression: used to follow hashmap bucket order)" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+
+    try obj.set("z", 1);
+    try obj.set("a", 2);
+    try obj.set("m", 3);
+    try obj.set("b", 4);
+
+    const ks = try obj.keys(testing.allocator);
+    defer testing.allocator.free(ks);
+
+    try testing.expectEqual(@as(usize, 4), ks.len);
+    try testing.expectEqualStrings("z", ks[0]);
+    try testing.expectEqualStrings("a", ks[1]);
+    try testing.expectEqualStrings("m", ks[2]);
+    try testing.expectEqualStrings("b", ks[3]);
+}
+
+test "keys() puts array-index keys first, ascending, before other string keys" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+
+    // Insertion order: b, "2", a, "1" - ECMA-262 OrdinaryOwnPropertyKeys
+    // requires array-index keys ("1", "2") first in ascending numeric
+    // order, then the rest ("b", "a") in insertion order.
+    try obj.set("b", 1);
+    try obj.set("2", 2);
+    try obj.set("a", 3);
+    try obj.set("1", 4);
+
+    const ks = try obj.keys(testing.allocator);
+    defer testing.allocator.free(ks);
+
+    try testing.expectEqual(@as(usize, 4), ks.len);
+    try testing.expectEqualStrings("1", ks[0]);
+    try testing.expectEqualStrings("2", ks[1]);
+    try testing.expectEqualStrings("b", ks[2]);
+    try testing.expectEqualStrings("a", ks[3]);
+}
+
+test "delete() preserves relative order of surviving properties" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+
+    try obj.set("z", 1);
+    try obj.set("a", 2);
+    try obj.set("m", 3);
+    try obj.set("b", 4);
+
+    try testing.expect(try obj.delete("a"));
+    try obj.set("c", 5);
+
+    const ks = try obj.keys(testing.allocator);
+    defer testing.allocator.free(ks);
+
+    try testing.expectEqual(@as(usize, 4), ks.len);
+    try testing.expectEqualStrings("z", ks[0]);
+    try testing.expectEqualStrings("m", ks[1]);
+    try testing.expectEqualStrings("b", ks[2]);
+    try testing.expectEqualStrings("c", ks[3]);
+}
+
+test "values()/entries()/forEach follow the same enumeration order as keys()" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+
+    try obj.set("z", 1);
+    try obj.set("1", 2);
+    try obj.set("a", 3);
+
+    const vs = try obj.values(testing.allocator);
+    defer testing.allocator.free(vs);
+    try testing.expectEqualSlices(i32, &[_]i32{ 2, 1, 3 }, vs);
+
+    const es = try obj.entries(testing.allocator);
+    defer testing.allocator.free(es);
+    try testing.expectEqualStrings("1", es[0].key);
+    try testing.expectEqualStrings("z", es[1].key);
+    try testing.expectEqualStrings("a", es[2].key);
+
+    var visited: std.ArrayList([]const u8) = .empty;
+    defer visited.deinit(testing.allocator);
+    obj.forEach(&visited, struct {
+        fn callback(ctx: *std.ArrayList([]const u8), key: []const u8, value: i32) void {
+            _ = value;
+            ctx.append(testing.allocator, key) catch unreachable;
+        }
+    }.callback);
+    try testing.expectEqualStrings("1", visited.items[0]);
+    try testing.expectEqualStrings("z", visited.items[1]);
+    try testing.expectEqualStrings("a", visited.items[2]);
+}
+
+test "Object.is: differs from == only for +0/-0 and NaN on floats" {
+    const ZObjF = ZObject(f64);
+    try testing.expect(ZObjF.is(f64, 1.5, 1.5));
+    try testing.expect(!ZObjF.is(f64, 0.0, -0.0));
+    try testing.expect(ZObjF.is(f64, std.math.nan(f64), std.math.nan(f64)));
+    try testing.expect(ZObject(i32).is(i32, 5, 5));
+}
+
+test "hasOwn is an alias of hasOwnProperty" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+    try obj.set("x", 1);
+
+    try testing.expect(obj.hasOwn("x"));
+    try testing.expect(!obj.hasOwn("y"));
+}
+
+test "toLocaleString falls back to toString" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+
+    const s1 = try obj.toString(testing.allocator);
+    defer testing.allocator.free(s1);
+    const s2 = try obj.toLocaleString(testing.allocator);
+    defer testing.allocator.free(s2);
+
+    try testing.expectEqualStrings(s1, s2);
+}
+
+test "createWithProperties defines properties at construction time" {
+    const PropertyDefinition = ZObject(i32).PropertyDefinition;
+
+    var obj = try ZObject(i32).createWithProperties(testing.allocator, null, &[_]PropertyDefinition{
+        .{ .key = "x", .value = 1, .descriptor = PropertyDescriptor.dataDescriptor() },
+        .{ .key = "y", .value = 2, .descriptor = PropertyDescriptor.dataDescriptor() },
+    });
+    defer obj.deinit();
+
+    try testing.expectEqual(@as(?i32, 1), obj.get("x"));
+    try testing.expectEqual(@as(?i32, 2), obj.get("y"));
+}
