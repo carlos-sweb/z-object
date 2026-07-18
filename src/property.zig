@@ -60,8 +60,24 @@ pub fn Property(comptime T: type) type {
     return struct {
         value: T,
         descriptor: PropertyDescriptor,
+        /// JS accessor property slots (`{ get x() {}, set x(v) {} }`),
+        /// typed in T so they can hold real function values with captured
+        /// context -- unlike the legacy context-free fn pointers on
+        /// PropertyDescriptor. A property with either slot non-null is an
+        /// accessor; `value` then holds a caller-supplied placeholder for
+        /// data-only consumers (JSON writers, Object.assign) that can't
+        /// invoke functions. Invoking an accessor is the *interpreter's*
+        /// job -- this repo only stores and exposes them.
+        getter: ?T = null,
+        setter: ?T = null,
 
         const Self = @This();
+
+        /// True when this property is a JS accessor (has a getter and/or
+        /// setter) rather than an ordinary data property.
+        pub fn isAccessor(self: *const Self) bool {
+            return self.getter != null or self.setter != null;
+        }
 
         /// Initialize property with default descriptor
         pub fn init(value: T) Self {

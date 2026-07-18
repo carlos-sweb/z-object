@@ -3,6 +3,44 @@ const testing = std.testing;
 const ZObject = @import("zobject").ZObject;
 const PropertyDescriptor = @import("zobject").PropertyDescriptor;
 
+test "defineAccessor: get and set for the same key merge into one record" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+
+    // 0 stands in for the caller's "empty" value (JSValue.UNDEFINED in
+    // the interpreter); getters/setters are i32 markers here.
+    try obj.defineAccessor("x", 11, null, 0);
+    try obj.defineAccessor("x", null, 22, 0);
+
+    const rec = obj.getOwnRecord("x").?;
+    try testing.expect(rec.isAccessor());
+    try testing.expectEqual(@as(?i32, 11), rec.getter);
+    try testing.expectEqual(@as(?i32, 22), rec.setter);
+    // Data-only consumers see the placeholder value.
+    try testing.expectEqual(@as(?i32, 0), obj.get("x"));
+    try testing.expectEqual(@as(usize, 1), obj.size());
+}
+
+test "a plain set over an accessor replaces it with a data property" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+
+    try obj.defineAccessor("x", 11, null, 0);
+    try obj.set("x", 99);
+
+    const rec = obj.getOwnRecord("x").?;
+    try testing.expect(!rec.isAccessor());
+    try testing.expectEqual(@as(i32, 99), rec.value);
+}
+
+test "getOwnRecord is own-only and null for missing keys" {
+    var obj = ZObject(i32).init(testing.allocator);
+    defer obj.deinit();
+    try obj.set("a", 1);
+    try testing.expect(obj.getOwnRecord("a") != null);
+    try testing.expect(obj.getOwnRecord("missing") == null);
+}
+
 test "defineProperty with custom descriptor" {
     var obj = ZObject(i32).init(testing.allocator);
     defer obj.deinit();

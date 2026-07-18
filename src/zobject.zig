@@ -115,8 +115,14 @@ pub fn ZObject(comptime T: type) type {
 
             // Update or create property
             if (self.properties.getEntry(key)) |entry| {
-                // Update existing property value
+                // Update existing property value. A plain set over an
+                // accessor property replaces it wholesale with a data
+                // property (raw storage semantics -- [[Set]]'s
+                // call-the-setter behavior is the interpreter's dispatch,
+                // which runs *before* ever reaching this).
                 entry.value_ptr.value = value;
+                entry.value_ptr.getter = null;
+                entry.value_ptr.setter = null;
             } else {
                 // Create new property with duplicated key
                 const key_copy = try self.allocator.dupe(u8, key);
@@ -124,6 +130,39 @@ pub fn ZObject(comptime T: type) type {
 
                 try self.properties.put(self.allocator, key_copy, property_mod.Property(T).init(value));
             }
+        }
+
+        /// Defines (or extends) a JS accessor property. Called once per
+        /// `get x()` / `set x(v)` clause: when the key already holds an
+        /// accessor, non-null slots merge into it -- `{ get x() {},
+        /// set x(v) {} }` yields ONE property with both slots, matching
+        /// real object-literal semantics. Defining over a *data* property
+        /// replaces it. `empty_value` is what data-only consumers (keys/
+        /// values/entries/JSON) see as the property's value; this type is
+        /// generic so the caller supplies it (e.g. JSValue.UNDEFINED).
+        pub fn defineAccessor(self: *Self, key: []const u8, getter: ?T, setter: ?T, empty_value: T) !void {
+            if (self.is_frozen) return errors_mod.ZObjectError.ObjectIsFrozen;
+            if (self.properties.getEntry(key)) |entry| {
+                if (!entry.value_ptr.isAccessor()) entry.value_ptr.value = empty_value;
+                if (getter) |g| entry.value_ptr.getter = g;
+                if (setter) |s| entry.value_ptr.setter = s;
+                return;
+            }
+            if (!self.is_extensible) return errors_mod.ZObjectError.ObjectNotExtensible;
+            const key_copy = try self.allocator.dupe(u8, key);
+            errdefer self.allocator.free(key_copy);
+            var prop = property_mod.Property(T).init(empty_value);
+            prop.getter = getter;
+            prop.setter = setter;
+            try self.properties.put(self.allocator, key_copy, prop);
+        }
+
+        /// Own-property record, exposing accessor slots -- for callers
+        /// (the interpreter) that need to distinguish data from accessor
+        /// properties and walk the prototype chain themselves.
+        pub fn getOwnRecord(self: *const Self, key: []const u8) ?*const property_mod.Property(T) {
+            if (self.properties.getPtr(key)) |prop| return prop;
+            return null;
         }
 
         /// Object [[Get]] - own properties first, then walks the prototype
