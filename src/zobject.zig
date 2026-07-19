@@ -165,6 +165,16 @@ pub fn ZObject(comptime T: type) type {
             return null;
         }
 
+        /// Mutable own-property record -- the embedder's
+        /// Object.defineProperty implements the spec's partial-descriptor
+        /// MERGE through this (define bypasses `writable`, unlike set();
+        /// the embedder enforces the configurable rules itself since only
+        /// it knows which descriptor fields were present in the JS call).
+        pub fn getOwnRecordMut(self: *Self, key: []const u8) ?*property_mod.Property(T) {
+            if (self.properties.getPtr(key)) |prop| return prop;
+            return null;
+        }
+
         /// Object [[Get]] - own properties first, then walks the prototype
         /// chain. Matches real ECMAScript property access (obj.prop):
         /// enumerability never gates this, only iteration methods
