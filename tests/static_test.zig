@@ -111,7 +111,7 @@ test "Object.assign() fails on frozen target" {
 }
 
 test "Object.create() with null prototype" {
-    var obj = try ZObject(i32).create(testing.allocator, null);
+    var obj = ZObject(i32).create(testing.allocator, null);
     defer obj.deinit();
 
     try obj.set("test", 42);
@@ -123,7 +123,7 @@ test "Object.create() with specific prototype" {
     defer proto.deinit();
     try proto.set("inherited", 100);
 
-    var obj = try ZObject(i32).create(testing.allocator, &proto);
+    var obj = ZObject(i32).create(testing.allocator, &proto);
     defer obj.deinit();
 
     try testing.expectEqual(&proto, obj.getPrototype().?);

@@ -158,7 +158,7 @@ test "Object.create with prototype" {
     defer proto.deinit();
     try proto.set("inherited", 999);
 
-    var obj = try ZObject(i32).create(testing.allocator, &proto);
+    var obj = ZObject(i32).create(testing.allocator, &proto);
     defer obj.deinit();
 
     try testing.expectEqual(&proto, obj.getPrototype().?);
@@ -166,7 +166,7 @@ test "Object.create with prototype" {
 }
 
 test "Object.create with null prototype" {
-    var obj = try ZObject(i32).create(testing.allocator, null);
+    var obj = ZObject(i32).create(testing.allocator, null);
     defer obj.deinit();
 
     try testing.expect(obj.getPrototype() == null);

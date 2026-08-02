@@ -7,12 +7,10 @@ pub const ZObjectError = error{
     PropertyNotWritable,
     PropertyNotConfigurable,
     ObjectIsFrozen,
-    ObjectIsSealed,
     ObjectNotExtensible,
     InvalidDescriptor,
     InvalidState,
     PrototypeCycle,
-    KeyAlreadyExists,
 };
 
 /// Context for error reporting

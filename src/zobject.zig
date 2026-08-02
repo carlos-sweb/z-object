@@ -91,7 +91,7 @@ pub fn ZObject(comptime T: type) type {
         // ===== Instance Methods =====
 
         /// Set property with validations (labeled block example 1)
-        pub fn set(self: *Self, key: []const u8, value: T) !void {
+        pub fn set(self: *Self, key: []const u8, value: T) errors_mod.ZObjectError!void {
             setter: {
                 // Check if frozen
                 if (self.is_frozen) {
@@ -140,7 +140,7 @@ pub fn ZObject(comptime T: type) type {
         /// replaces it. `empty_value` is what data-only consumers (keys/
         /// values/entries/JSON) see as the property's value; this type is
         /// generic so the caller supplies it (e.g. JSValue.UNDEFINED).
-        pub fn defineAccessor(self: *Self, key: []const u8, getter: ?T, setter: ?T, empty_value: T) !void {
+        pub fn defineAccessor(self: *Self, key: []const u8, getter: ?T, setter: ?T, empty_value: T) errors_mod.ZObjectError!void {
             if (self.is_frozen) return errors_mod.ZObjectError.ObjectIsFrozen;
             if (self.properties.getEntry(key)) |entry| {
                 if (!entry.value_ptr.isAccessor()) entry.value_ptr.value = empty_value;
@@ -194,7 +194,7 @@ pub fn ZObject(comptime T: type) type {
         }
 
         /// Delete property (labeled block example 2)
-        pub fn delete(self: *Self, key: []const u8) !bool {
+        pub fn delete(self: *Self, key: []const u8) errors_mod.ZObjectError!bool {
             deleter: {
                 // Check if frozen
                 if (self.is_frozen) {
@@ -244,7 +244,7 @@ pub fn ZObject(comptime T: type) type {
         }
 
         /// Clear all properties (labeled block example 3)
-        pub fn clear(self: *Self) !void {
+        pub fn clear(self: *Self) errors_mod.ZObjectError!void {
             clearer: {
                 if (self.is_frozen) {
                     return errors_mod.ZObjectError.ObjectIsFrozen;
@@ -402,7 +402,7 @@ pub fn ZObject(comptime T: type) type {
         }
 
         /// Object.assign() - Copy enumerable properties (labeled block example 4)
-        pub fn assign(target: *Self, sources: []const *const Self) !void {
+        pub fn assign(target: *Self, sources: []const *const Self) errors_mod.ZObjectError!void {
             for (sources) |source| {
                 assigner: {
                     if (target.is_frozen) {
@@ -427,7 +427,7 @@ pub fn ZObject(comptime T: type) type {
         }
 
         /// Object.create() - Create object with specific prototype
-        pub fn create(allocator: Allocator, proto: ?*Self) !Self {
+        pub fn create(allocator: Allocator, proto: ?*Self) Self {
             var obj = Self.init(allocator);
             obj.prototype = proto;
             return obj;
@@ -436,8 +436,8 @@ pub fn ZObject(comptime T: type) type {
         /// Object.create(proto, propertiesObject) - like create(), but also
         /// defines properties in the same call, without changing create()'s
         /// existing signature.
-        pub fn createWithProperties(allocator: Allocator, proto: ?*Self, props: []const PropertyDefinition) !Self {
-            var obj = try Self.create(allocator, proto);
+        pub fn createWithProperties(allocator: Allocator, proto: ?*Self, props: []const PropertyDefinition) errors_mod.ZObjectError!Self {
+            var obj = Self.create(allocator, proto);
             errdefer obj.deinit();
             try obj.defineProperties(props);
             return obj;
@@ -522,7 +522,7 @@ pub fn ZObject(comptime T: type) type {
         }
 
         /// Object.fromEntries() - Create object from entries
-        pub fn fromEntries(allocator: Allocator, entry_list: []const Entry) !Self {
+        pub fn fromEntries(allocator: Allocator, entry_list: []const Entry) errors_mod.ZObjectError!Self {
             var obj = Self.init(allocator);
             errdefer obj.deinit();
 
@@ -541,7 +541,7 @@ pub fn ZObject(comptime T: type) type {
             key: []const u8,
             value: T,
             descriptor: property_mod.PropertyDescriptor,
-        ) !void {
+        ) errors_mod.ZObjectError!void {
             definer: {
                 // Validate descriptor
                 try descriptor.validate();
@@ -577,7 +577,7 @@ pub fn ZObject(comptime T: type) type {
         pub fn defineProperties(
             self: *Self,
             props: []const PropertyDefinition,
-        ) !void {
+        ) errors_mod.ZObjectError!void {
             for (props) |prop| {
                 try self.defineProperty(prop.key, prop.value, prop.descriptor);
             }
@@ -620,7 +620,7 @@ pub fn ZObject(comptime T: type) type {
             self: *Self,
             key: []const u8,
             descriptor: property_mod.PropertyDescriptor,
-        ) !void {
+        ) errors_mod.ZObjectError!void {
             const entry = self.properties.getEntry(key) orelse {
                 return errors_mod.ZObjectError.PropertyNotFound;
             };
@@ -636,7 +636,7 @@ pub fn ZObject(comptime T: type) type {
         // ===== Prototype Chain Methods =====
 
         /// Object.setPrototypeOf()
-        pub fn setPrototype(self: *Self, proto: ?*Self) !void {
+        pub fn setPrototype(self: *Self, proto: ?*Self) errors_mod.ZObjectError!void {
             // Check for cycles
             if (proto) |p| {
                 if (p == self) {
@@ -908,7 +908,7 @@ pub fn ZObject(comptime T: type) type {
         // ===== Validation =====
 
         /// Validate object state (labeled block example 8)
-        pub fn validate(self: *const Self) !void {
+        pub fn validate(self: *const Self) errors_mod.ZObjectError!void {
             validator: {
                 // Validate state consistency
                 if (self.is_frozen and !self.is_sealed) {

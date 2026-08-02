@@ -1,4 +1,5 @@
 const std = @import("std");
+const errors = @import("errors.zig");
 
 /// ECMAScript Property Descriptor
 /// Defines the characteristics of an object property
@@ -23,10 +24,10 @@ pub const PropertyDescriptor = struct {
     }
 
     /// Validate descriptor consistency
-    pub fn validate(self: *const PropertyDescriptor) !void {
+    pub fn validate(self: *const PropertyDescriptor) errors.ZObjectError!void {
         // Data and accessor descriptors are mutually exclusive
         if (self.isDataDescriptor() and self.isAccessorDescriptor()) {
-            return error.InvalidDescriptor;
+            return errors.ZObjectError.InvalidDescriptor;
         }
     }
 
