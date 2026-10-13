@@ -1,9 +1,9 @@
 # Z-Object
 
-Implementación de objetos compatible con ECMAScript de alto rendimiento en Zig 0.16
+Implementación de objetos compatible con ECMAScript de alto rendimiento en Zig 0.17
 
-[![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
-[![Tests](https://img.shields.io/badge/tests-125%20passing-brightgreen.svg)](https://github.com/yourusername/z-object)
+[![Zig](https://img.shields.io/badge/zig-0.17.0-orange.svg)](https://ziglang.org/download/)
+[![CI](https://github.com/carlos-sweb/z-object/actions/workflows/docs.yml/badge.svg)](https://github.com/carlos-sweb/z-object/actions/workflows/docs.yml)
 [![Licencia](https://img.shields.io/badge/licencia-MIT-blue.svg)](LICENSE)
 
 ## Características
@@ -65,16 +65,33 @@ pub fn main() !void {
 }  
 ```
 
+## Documentación
+
+[Consultar la API generada](https://carlos-sweb.github.io/z-object/#zobject). Requiere **Zig 0.17.0**; `mise install` utiliza la versión fijada.
+
+```bash
+zig build docs
+python3 -m http.server 8000 --directory zig-out/docs
+```
+
+Abre `http://localhost:8000/#zobject`. El paso `docs` utiliza el generador nativo de documentación de Zig. GitHub Actions ejecuta las pruebas y publica la API en GitHub Pages con cada push a `master`; los archivos generados no se incluyen en Git.
+
 ## Instalación
 
 ### Usando el Gestor de Paquetes de Zig
 
-Agregar a tu `build.zig.zon`:
+Instala la versión publicada (Zig escribe automáticamente el hash):
+
+```bash
+zig fetch --save=zobject https://github.com/carlos-sweb/z-object/archive/refs/tags/v0.1.0.tar.gz
+```
+
+O agrega a tu `build.zig.zon`:
 
 ```zig
 .dependencies = .{
     .zobject = .{
-        .url = "https://github.com/yourusername/z-object/archive/main.tar.gz",
+        .url = "https://github.com/carlos-sweb/z-object/archive/refs/tags/v0.1.0.tar.gz",
         .hash = "...", // Ejecutar zig build para obtener el hash
     },
 },
@@ -382,4 +399,4 @@ Licencia MIT - ver archivo [LICENSE](LICENSE) para detalles
 
 ## Créditos
 
-Construido con ❤️ usando [Zig](https://ziglang.org/) 0.16.0
+Construido con ❤️ usando [Zig](https://ziglang.org/) 0.17.0

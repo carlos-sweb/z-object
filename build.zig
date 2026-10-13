@@ -7,7 +7,22 @@ pub fn build(b: *std.Build) void {
     // Create zobject module
     const zobject_module = b.addModule("zobject", .{
         .root_source_file = b.path("src/zobject.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+
+    const docs_library = b.addLibrary(.{
+        .name = "zobject",
+        .root_module = zobject_module,
+        .linkage = .static,
+    });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_library.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    b.step("docs", "Generate the Zig API documentation in zig-out/docs")
+        .dependOn(&install_docs.step);
 
     // Test setup
     const test_step = b.step("test", "Run all tests");

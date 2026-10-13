@@ -1,9 +1,9 @@
 # Z-Object
 
-High-performance ECMAScript-compatible object implementation in Zig 0.16
+High-performance ECMAScript-compatible object implementation in Zig 0.17
 
-[![Zig](https://img.shields.io/badge/zig-0.16.0-orange.svg)](https://ziglang.org/download/)
-[![Tests](https://img.shields.io/badge/tests-125%20passing-brightgreen.svg)](https://github.com/yourusername/z-object)
+[![Zig](https://img.shields.io/badge/zig-0.17.0-orange.svg)](https://ziglang.org/download/)
+[![CI](https://github.com/carlos-sweb/z-object/actions/workflows/docs.yml/badge.svg)](https://github.com/carlos-sweb/z-object/actions/workflows/docs.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Features
@@ -65,16 +65,33 @@ pub fn main() !void {
 }
 ```
 
+## Documentation
+
+[Browse the generated API reference](https://carlos-sweb.github.io/z-object/#zobject). Requires **Zig 0.17.0**; `mise install` uses the pinned compiler.
+
+```bash
+zig build docs
+python3 -m http.server 8000 --directory zig-out/docs
+```
+
+Open `http://localhost:8000/#zobject`. The `docs` step uses Zig’s native documentation generator. GitHub Actions tests the project and publishes the API to GitHub Pages on every push to `master`; generated files are not committed.
+
 ## Installation
 
 ### Using Zig Package Manager
 
-Add to your `build.zig.zon`:
+Install the tagged release (Zig writes the dependency hash automatically):
+
+```bash
+zig fetch --save=zobject https://github.com/carlos-sweb/z-object/archive/refs/tags/v0.1.0.tar.gz
+```
+
+Or add to your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
     .zobject = .{
-        .url = "https://github.com/yourusername/z-object/archive/main.tar.gz",
+        .url = "https://github.com/carlos-sweb/z-object/archive/refs/tags/v0.1.0.tar.gz",
         .hash = "...", // Run zig build to get the hash
     },
 },
@@ -382,4 +399,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Credits
 
-Built with ❤️ using [Zig](https://ziglang.org/) 0.16.0
+Built with ❤️ using [Zig](https://ziglang.org/) 0.17.0

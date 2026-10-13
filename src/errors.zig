@@ -18,6 +18,7 @@ pub const ErrorContext = struct {
     message: []const u8,
     property: ?[]const u8 = null,
 
+    /// Write the message and optional property name; propagates writer errors.
     pub fn format(self: ErrorContext, writer: *std.Io.Writer) !void {
         try writer.print("ZObjectError: {s}", .{self.message});
         if (self.property) |prop| {

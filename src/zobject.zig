@@ -1,3 +1,6 @@
+//! Generic objects with owned string keys, property descriptors and prototype lookup.
+//! Values and prototypes are borrowed: the caller manages their lifetime.
+//! Enumeration follows ECMAScript array-index order, then string insertion order.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const property_mod = @import("property.zig");
@@ -932,9 +935,13 @@ pub fn ZObject(comptime T: type) type {
 }
 
 // Re-export commonly used types for external use
+/// Flags and optional legacy accessor callbacks for a property.
 pub const PropertyDescriptor = @import("property.zig").PropertyDescriptor;
+/// A typed property value, descriptor and optional accessor slots.
 pub const Property = @import("property.zig").Property;
+/// Allocation, descriptor, integrity and prototype errors returned by object operations.
 pub const ZObjectError = @import("errors.zig").ZObjectError;
+/// Formattable error message with an optional property name.
 pub const ErrorContext = @import("errors.zig").ErrorContext;
 
 test "basic ZObject usage" {
