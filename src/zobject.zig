@@ -6,6 +6,15 @@ const Allocator = std.mem.Allocator;
 const property_mod = @import("property.zig");
 const errors_mod = @import("errors.zig");
 
+var global_shape_counter = std.atomic.Value(u32).init(2);
+
+/// Returns a globally unique, monotonically increasing shape ID (>= 2).
+/// Shape ID 1 is reserved for freshly initialized empty objects.
+pub fn nextGlobalShapeId() u32 {
+    const id = global_shape_counter.fetchAdd(1, .monotonic);
+    return if (id <= 1) global_shape_counter.fetchAdd(2, .monotonic) else id;
+}
+
 /// Generic ECMAScript-compatible Object implementation
 pub fn ZObject(comptime T: type) type {
     return struct {
@@ -27,6 +36,7 @@ pub fn ZObject(comptime T: type) type {
         is_frozen: bool,
         is_sealed: bool,
         is_extensible: bool,
+        shape_id: u32,
 
         /// Initialize a new ZObject
         pub fn init(allocator: Allocator) Self {
@@ -37,6 +47,7 @@ pub fn ZObject(comptime T: type) type {
                 .is_frozen = false,
                 .is_sealed = false,
                 .is_extensible = true,
+                .shape_id = 1,
             };
         }
 
@@ -93,45 +104,46 @@ pub fn ZObject(comptime T: type) type {
 
         // ===== Instance Methods =====
 
-        /// Set property with validations (labeled block example 1)
+        /// Set property with validations in a single hash lookup
         pub fn set(self: *Self, key: []const u8, value: T) errors_mod.ZObjectError!void {
-            setter: {
-                // Check if frozen
-                if (self.is_frozen) {
-                    return errors_mod.ZObjectError.ObjectIsFrozen;
-                }
-
-                // Check if property exists and is writable
-                if (self.properties.get(key)) |prop| {
-                    if (!prop.descriptor.writable) {
-                        return errors_mod.ZObjectError.PropertyNotWritable;
-                    }
-                    // Property exists and is writable, continue to update
-                    break :setter;
-                }
-
-                // Check if extensible for new properties
-                if (!self.is_extensible) {
-                    return errors_mod.ZObjectError.ObjectNotExtensible;
-                }
+            if (self.is_frozen) {
+                return errors_mod.ZObjectError.ObjectIsFrozen;
             }
 
-            // Update or create property
-            if (self.properties.getEntry(key)) |entry| {
-                // Update existing property value. A plain set over an
-                // accessor property replaces it wholesale with a data
-                // property (raw storage semantics -- [[Set]]'s
-                // call-the-setter behavior is the interpreter's dispatch,
-                // which runs *before* ever reaching this).
-                entry.value_ptr.value = value;
-                entry.value_ptr.getter = null;
-                entry.value_ptr.setter = null;
-            } else {
-                // Create new property with duplicated key
-                const key_copy = try self.allocator.dupe(u8, key);
-                errdefer self.allocator.free(key_copy);
+            if (!self.is_extensible) {
+                const prop = self.properties.getPtr(key) orelse return errors_mod.ZObjectError.ObjectNotExtensible;
+                if (!prop.descriptor.writable) {
+                    return errors_mod.ZObjectError.PropertyNotWritable;
+                }
+                const was_accessor = prop.isAccessor();
+                prop.value = value;
+                prop.getter = null;
+                prop.setter = null;
+                prop.descriptor.is_accessor = false;
+                if (was_accessor) self.shape_id = nextGlobalShapeId();
+                return;
+            }
 
-                try self.properties.put(self.allocator, key_copy, property_mod.Property(T).init(value));
+            const gop = try self.properties.getOrPut(self.allocator, key);
+            if (gop.found_existing) {
+                if (!gop.value_ptr.descriptor.writable) {
+                    return errors_mod.ZObjectError.PropertyNotWritable;
+                }
+                // Update existing property value in place (no key dupe, no shape_id bump for data update).
+                const was_accessor = gop.value_ptr.isAccessor();
+                gop.value_ptr.value = value;
+                gop.value_ptr.getter = null;
+                gop.value_ptr.setter = null;
+                gop.value_ptr.descriptor.is_accessor = false;
+                if (was_accessor) self.shape_id = nextGlobalShapeId();
+            } else {
+                const key_copy = self.allocator.dupe(u8, key) catch |err| {
+                    self.properties.swapRemoveAt(gop.index);
+                    return err;
+                };
+                gop.key_ptr.* = key_copy;
+                gop.value_ptr.* = property_mod.Property(T).init(value);
+                self.shape_id = nextGlobalShapeId();
             }
         }
 
@@ -145,19 +157,35 @@ pub fn ZObject(comptime T: type) type {
         /// generic so the caller supplies it (e.g. JSValue.UNDEFINED).
         pub fn defineAccessor(self: *Self, key: []const u8, getter: ?T, setter: ?T, empty_value: T) errors_mod.ZObjectError!void {
             if (self.is_frozen) return errors_mod.ZObjectError.ObjectIsFrozen;
-            if (self.properties.getEntry(key)) |entry| {
-                if (!entry.value_ptr.isAccessor()) entry.value_ptr.value = empty_value;
-                if (getter) |g| entry.value_ptr.getter = g;
-                if (setter) |s| entry.value_ptr.setter = s;
+            if (!self.is_extensible) {
+                const prop = self.properties.getPtr(key) orelse return errors_mod.ZObjectError.ObjectNotExtensible;
+                if (!prop.isAccessor()) prop.value = empty_value;
+                if (getter) |g| prop.getter = g;
+                if (setter) |s| prop.setter = s;
+                prop.descriptor.is_accessor = true;
+                self.shape_id = nextGlobalShapeId();
                 return;
             }
-            if (!self.is_extensible) return errors_mod.ZObjectError.ObjectNotExtensible;
-            const key_copy = try self.allocator.dupe(u8, key);
-            errdefer self.allocator.free(key_copy);
+            const gop = try self.properties.getOrPut(self.allocator, key);
+            if (gop.found_existing) {
+                if (!gop.value_ptr.isAccessor()) gop.value_ptr.value = empty_value;
+                if (getter) |g| gop.value_ptr.getter = g;
+                if (setter) |s| gop.value_ptr.setter = s;
+                gop.value_ptr.descriptor.is_accessor = true;
+                self.shape_id = nextGlobalShapeId();
+                return;
+            }
+            const key_copy = self.allocator.dupe(u8, key) catch |err| {
+                self.properties.swapRemoveAt(gop.index);
+                return err;
+            };
+            gop.key_ptr.* = key_copy;
             var prop = property_mod.Property(T).init(empty_value);
             prop.getter = getter;
             prop.setter = setter;
-            try self.properties.put(self.allocator, key_copy, prop);
+            prop.descriptor.is_accessor = true;
+            gop.value_ptr.* = prop;
+            self.shape_id = nextGlobalShapeId();
         }
 
         /// Own-property record, exposing accessor slots -- for callers
@@ -221,6 +249,7 @@ pub fn ZObject(comptime T: type) type {
             // surviving properties, per OrdinaryOwnPropertyKeys).
             if (self.properties.fetchOrderedRemove(key)) |removed| {
                 self.allocator.free(removed.key);
+                self.shape_id = nextGlobalShapeId();
                 return true;
             }
 
@@ -272,6 +301,7 @@ pub fn ZObject(comptime T: type) type {
 
             // Clear the map
             self.properties.clearRetainingCapacity();
+            self.shape_id = nextGlobalShapeId();
         }
 
         /// Check if property is enumerable
@@ -457,6 +487,7 @@ pub fn ZObject(comptime T: type) type {
                     prop.descriptor.writable = false;
                     prop.descriptor.configurable = false;
                 }
+                self.shape_id = nextGlobalShapeId();
 
                 break :freezer;
             }
@@ -470,6 +501,7 @@ pub fn ZObject(comptime T: type) type {
             for (self.properties.values()) |*prop| {
                 prop.descriptor.configurable = false;
             }
+            self.shape_id = nextGlobalShapeId();
         }
 
         /// Object.preventExtensions() - Prevent adding new properties
@@ -545,34 +577,48 @@ pub fn ZObject(comptime T: type) type {
             value: T,
             descriptor: property_mod.PropertyDescriptor,
         ) errors_mod.ZObjectError!void {
-            definer: {
-                // Validate descriptor
-                try descriptor.validate();
+            try descriptor.validate();
 
-                // Check if object is extensible for new properties
-                if (!self.hasOwnProperty(key) and !self.is_extensible) {
-                    return errors_mod.ZObjectError.ObjectNotExtensible;
-                }
-
-                // Check if existing property is configurable
-                if (self.properties.get(key)) |existing| {
-                    if (!existing.descriptor.configurable) {
+            if (self.is_extensible) {
+                const gop = try self.properties.getOrPut(self.allocator, key);
+                if (gop.found_existing) {
+                    if (!gop.value_ptr.descriptor.configurable) {
                         return errors_mod.ZObjectError.PropertyNotConfigurable;
                     }
+                    const old = gop.value_ptr.descriptor;
+                    const desc_changed = old.writable != descriptor.writable or
+                        old.enumerable != descriptor.enumerable or
+                        old.configurable != descriptor.configurable or
+                        old.is_accessor != descriptor.is_accessor;
+                    gop.value_ptr.value = value;
+                    gop.value_ptr.descriptor = descriptor;
+                    if (desc_changed) {
+                        self.shape_id = nextGlobalShapeId();
+                    }
+                } else {
+                    errdefer _ = self.properties.orderedRemove(key);
+                    const key_copy = try self.allocator.dupe(u8, key);
+                    gop.key_ptr.* = key_copy;
+                    gop.value_ptr.* = property_mod.Property(T).initWithDescriptor(value, descriptor);
+                    self.shape_id = nextGlobalShapeId();
                 }
-
-                break :definer;
-            }
-
-            // Create or update property
-            if (self.properties.getEntry(key)) |entry| {
-                entry.value_ptr.value = value;
-                entry.value_ptr.descriptor = descriptor;
             } else {
-                const key_copy = try self.allocator.dupe(u8, key);
-                errdefer self.allocator.free(key_copy);
-
-                try self.properties.put(self.allocator, key_copy, property_mod.Property(T).initWithDescriptor(value, descriptor));
+                const prop_ptr = self.properties.getPtr(key) orelse {
+                    return errors_mod.ZObjectError.ObjectNotExtensible;
+                };
+                if (!prop_ptr.descriptor.configurable) {
+                    return errors_mod.ZObjectError.PropertyNotConfigurable;
+                }
+                const old = prop_ptr.descriptor;
+                const desc_changed = old.writable != descriptor.writable or
+                    old.enumerable != descriptor.enumerable or
+                    old.configurable != descriptor.configurable or
+                    old.is_accessor != descriptor.is_accessor;
+                prop_ptr.value = value;
+                prop_ptr.descriptor = descriptor;
+                if (desc_changed) {
+                    self.shape_id = nextGlobalShapeId();
+                }
             }
         }
 
@@ -624,16 +670,17 @@ pub fn ZObject(comptime T: type) type {
             key: []const u8,
             descriptor: property_mod.PropertyDescriptor,
         ) errors_mod.ZObjectError!void {
-            const entry = self.properties.getEntry(key) orelse {
+            const prop_ptr = self.properties.getPtr(key) orelse {
                 return errors_mod.ZObjectError.PropertyNotFound;
             };
 
-            if (!entry.value_ptr.descriptor.configurable) {
+            if (!prop_ptr.descriptor.configurable) {
                 return errors_mod.ZObjectError.PropertyNotConfigurable;
             }
 
             try descriptor.validate();
-            entry.value_ptr.descriptor = descriptor;
+            prop_ptr.descriptor = descriptor;
+            self.shape_id = nextGlobalShapeId();
         }
 
         // ===== Prototype Chain Methods =====

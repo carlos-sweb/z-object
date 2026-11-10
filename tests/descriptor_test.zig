@@ -309,27 +309,22 @@ test "updateDescriptor fails for non-configurable property" {
 
 test "PropertyDescriptor.isDataDescriptor" {
     const desc1 = PropertyDescriptor{
-        .value = null,
         .writable = true,
     };
     try testing.expect(desc1.isDataDescriptor());
 
     const desc2 = PropertyDescriptor{
         .writable = false,
-        .get = null,
-        .set = null,
     };
     try testing.expect(!desc2.isAccessorDescriptor());
 }
 
 test "PropertyDescriptor default values" {
     const desc = PropertyDescriptor{};
-    try testing.expect(desc.value == null);
     try testing.expect(desc.writable);
     try testing.expect(desc.enumerable);
     try testing.expect(desc.configurable);
-    try testing.expect(desc.get == null);
-    try testing.expect(desc.set == null);
+    try testing.expect(!desc.is_accessor);
 }
 
 test "Property with custom descriptor" {
@@ -431,4 +426,56 @@ test "values only returns enumerable property values" {
     // Should only contain 100
     try testing.expectEqual(@as(usize, 1), value_list.len);
     try testing.expectEqual(@as(i32, 100), value_list[0]);
+}
+
+test "compact Property size <= 32B" {
+    const Property = @import("zobject").Property;
+    try testing.expectEqual(@as(usize, 4), @sizeOf(PropertyDescriptor));
+    try testing.expect(@sizeOf(Property(i32)) <= 32);
+    try testing.expectEqual(@as(usize, 24), @sizeOf(Property(i32)));
+}
+
+test "monotonic shape_id: {a:1} and {b:1} have distinct shape_id" {
+    var obj_a = ZObject(i32).init(testing.allocator);
+    defer obj_a.deinit();
+    var obj_b = ZObject(i32).init(testing.allocator);
+    defer obj_b.deinit();
+
+    try testing.expectEqual(@as(u32, 1), obj_a.shape_id);
+    try testing.expectEqual(@as(u32, 1), obj_b.shape_id);
+
+    try obj_a.set("a", 1);
+    try obj_b.set("b", 1);
+
+    try testing.expect(obj_a.shape_id != 1);
+    try testing.expect(obj_b.shape_id != 1);
+    try testing.expect(obj_a.shape_id != obj_b.shape_id);
+}
+
+test "monotonic shape_id: transitions and update existing key" {
+    var obj1 = ZObject(i32).init(testing.allocator);
+    defer obj1.deinit();
+    var obj2 = ZObject(i32).init(testing.allocator);
+    defer obj2.deinit();
+
+    try obj1.set("a", 1);
+    const shape_after_a = obj1.shape_id;
+
+    // Updating existing key "a" does NOT change shape_id
+    try obj1.set("a", 99);
+    try testing.expectEqual(shape_after_a, obj1.shape_id);
+
+    // Adding new key "b" changes shape_id
+    try obj1.set("b", 2);
+    const shape_after_ab = obj1.shape_id;
+    try testing.expect(shape_after_ab != shape_after_a);
+
+    // {b: 2, a: 1} has a different shape_id from {a: 1, b: 2}
+    try obj2.set("b", 2);
+    try obj2.set("a", 1);
+    try testing.expect(obj1.shape_id != obj2.shape_id);
+
+    // Deleting a key changes shape_id
+    _ = try obj1.delete("b");
+    try testing.expect(obj1.shape_id != shape_after_ab);
 }
