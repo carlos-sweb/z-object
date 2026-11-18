@@ -36,6 +36,7 @@ pub fn ZObject(comptime T: type) type {
         is_frozen: bool,
         is_sealed: bool,
         is_extensible: bool,
+        is_error_data: bool = false,
         shape_id: u32,
 
         /// Initialize a new ZObject
@@ -47,6 +48,7 @@ pub fn ZObject(comptime T: type) type {
                 .is_frozen = false,
                 .is_sealed = false,
                 .is_extensible = true,
+                .is_error_data = false,
                 .shape_id = 1,
             };
         }
@@ -999,4 +1001,13 @@ test "basic ZObject usage" {
 
     try obj.set("age", 25);
     try testing.expectEqual(@as(?i32, 25), obj.get("age"));
+}
+
+test "is_error_data fits in ZObject padding without increasing @sizeOf" {
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(ZObject(u64)));
+    var obj = ZObject(u64).init(std.testing.allocator);
+    defer obj.deinit();
+    try std.testing.expect(!obj.is_error_data);
+    obj.is_error_data = true;
+    try std.testing.expect(obj.is_error_data);
 }
