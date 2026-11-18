@@ -47,6 +47,9 @@ pub fn ZObject(comptime T: type) type {
         is_extensible: bool,
         is_error_data: bool = false,
         shape_id: u32,
+        cached_shape_id: u32 = 0,
+        cached_len: u16 = 0,
+        active_len: u16 = 0,
 
         /// Initialize a new ZObject
         pub fn init(allocator: Allocator) Self {
@@ -59,11 +62,15 @@ pub fn ZObject(comptime T: type) type {
                 .is_extensible = true,
                 .is_error_data = false,
                 .shape_id = 1,
+                .cached_shape_id = 0,
+                .cached_len = 0,
+                .active_len = 0,
             };
         }
 
         /// Deinitialize and free all resources
         pub fn deinit(self: *Self) void {
+            if (self.cached_len > 0) self.syncPartialRecycle();
             // Free all owned keys (borrowed keys live in external intern pool)
             var it = self.properties.iterator();
             while (it.next()) |entry| {
@@ -76,6 +83,9 @@ pub fn ZObject(comptime T: type) type {
 
         /// Clear all properties retaining capacity and resetting state flags.
         pub fn clearRetainingCapacity(self: *Self) void {
+            self.cached_shape_id = 0;
+            self.cached_len = 0;
+            self.active_len = 0;
             var it = self.properties.iterator();
             while (it.next()) |entry| {
                 if (!entry.value_ptr.descriptor.borrowed_key) {
@@ -89,6 +99,50 @@ pub fn ZObject(comptime T: type) type {
             self.is_sealed = false;
             self.is_extensible = true;
             self.is_error_data = false;
+        }
+
+        pub fn canPreserveShape(self: *const Self) bool {
+            if (self.properties.count() == 0 or self.properties.count() > 8) return false;
+            if (self.is_frozen or !self.is_extensible) return false;
+            for (self.properties.entries.items(.value)) |rec| {
+                if (!rec.descriptor.borrowed_key or rec.isAccessor()) return false;
+                if (!rec.descriptor.writable or !rec.descriptor.enumerable or !rec.descriptor.configurable) return false;
+            }
+            return true;
+        }
+
+        pub fn recyclePreserveShape(self: *Self) void {
+            self.cached_shape_id = self.shape_id;
+            self.cached_len = @intCast(self.properties.count());
+            self.active_len = 0;
+            self.shape_id = 1;
+            self.prototype = null;
+            self.is_frozen = false;
+            self.is_sealed = false;
+            self.is_extensible = true;
+            self.is_error_data = false;
+        }
+
+        pub fn syncPartialRecycle(self: *Self) void {
+            if (self.cached_len == 0) return;
+            const active = self.active_len;
+            self.cached_len = 0;
+            self.cached_shape_id = 0;
+            self.active_len = 0;
+            if (active == 0) {
+                self.properties.clearRetainingCapacity();
+            } else {
+                var saved_keys: [8][]const u8 = undefined;
+                var saved_vals: [8]property_mod.Property(T) = undefined;
+                for (0..active) |i| {
+                    saved_keys[i] = self.properties.keys()[i];
+                    saved_vals[i] = self.properties.values()[i];
+                }
+                self.properties.clearRetainingCapacity();
+                for (0..active) |i| {
+                    self.properties.putNoClobber(self.allocator, saved_keys[i], saved_vals[i]) catch unreachable;
+                }
+            }
         }
 
         /// ECMA-262 CanonicalNumericIndexString / array-index test: no sign,
@@ -113,6 +167,7 @@ pub fn ZObject(comptime T: type) type {
         /// ascending numerically first, then the rest in their relative
         /// (insertion) order. Caller owns the returned slice.
         fn enumerationOrder(self: *const Self, allocator: Allocator) ![]usize {
+            if (self.cached_len > 0) @constCast(self).syncPartialRecycle();
             const ks = self.properties.keys();
             const idx = try allocator.alloc(usize, ks.len);
             for (idx, 0..) |*v, i| v.* = i;
@@ -136,6 +191,7 @@ pub fn ZObject(comptime T: type) type {
 
         /// Set property with validations in a single hash lookup
         pub fn set(self: *Self, key: []const u8, value: T) errors_mod.ZObjectError!void {
+            if (self.cached_len > 0) self.syncPartialRecycle();
             if (self.is_frozen) {
                 return errors_mod.ZObjectError.ObjectIsFrozen;
             }
@@ -181,6 +237,7 @@ pub fn ZObject(comptime T: type) type {
         /// outlives this ZObject (e.g. an interned constant pool key). Skips key
         /// allocation and pre-sizes empty objects to 4 slots.
         pub fn setBorrowedKey(self: *Self, key: []const u8, value: T) errors_mod.ZObjectError!void {
+            if (self.cached_len > 0) self.syncPartialRecycle();
             if (self.is_frozen) {
                 return errors_mod.ZObjectError.ObjectIsFrozen;
             }
@@ -227,7 +284,27 @@ pub fn ZObject(comptime T: type) type {
         /// expected_slot properties, is not frozen/sealed, and extensible, appends the property
         /// directly without rehashing/searching or recalculating shape_id.
         pub fn putBorrowedTransition(self: *Self, key: []const u8, value: T, expected_slot: usize, next_shape: u32) errors_mod.ZObjectError!bool {
-            if (self.properties.count() != expected_slot or self.is_frozen or !self.is_extensible) {
+            if (self.is_frozen or !self.is_extensible) {
+                return false;
+            }
+            if (self.cached_len > 0) {
+                if (expected_slot == self.active_len and expected_slot < self.cached_len) {
+                    const prop_keys = self.properties.keys();
+                    if (prop_keys[expected_slot].ptr == key.ptr or std.mem.eql(u8, prop_keys[expected_slot], key)) {
+                        self.properties.values()[expected_slot].value = value;
+                        self.active_len += 1;
+                        self.shape_id = next_shape;
+                        if (self.active_len == self.cached_len) {
+                            self.cached_len = 0;
+                            self.cached_shape_id = 0;
+                            self.active_len = 0;
+                        }
+                        return true;
+                    }
+                }
+                self.syncPartialRecycle();
+            }
+            if (self.properties.count() != expected_slot) {
                 return false;
             }
             if (expected_slot == 0) {
@@ -252,6 +329,7 @@ pub fn ZObject(comptime T: type) type {
         /// values/entries/JSON) see as the property's value; this type is
         /// generic so the caller supplies it (e.g. JSValue.UNDEFINED).
         pub fn defineAccessor(self: *Self, key: []const u8, getter: ?T, setter: ?T, empty_value: T) errors_mod.ZObjectError!void {
+            if (self.cached_len > 0) self.syncPartialRecycle();
             if (self.is_frozen) return errors_mod.ZObjectError.ObjectIsFrozen;
             if (!self.is_extensible) {
                 const prop = self.properties.getPtr(key) orelse return errors_mod.ZObjectError.ObjectNotExtensible;
@@ -288,6 +366,7 @@ pub fn ZObject(comptime T: type) type {
         /// (the interpreter) that need to distinguish data from accessor
         /// properties and walk the prototype chain themselves.
         pub fn getOwnRecord(self: *const Self, key: []const u8) ?*const property_mod.Property(T) {
+            if (self.cached_len > 0) @constCast(self).syncPartialRecycle();
             if (self.properties.getPtr(key)) |prop| return prop;
             return null;
         }
@@ -298,6 +377,7 @@ pub fn ZObject(comptime T: type) type {
         /// the embedder enforces the configurable rules itself since only
         /// it knows which descriptor fields were present in the JS call).
         pub fn getOwnRecordMut(self: *Self, key: []const u8) ?*property_mod.Property(T) {
+            if (self.cached_len > 0) self.syncPartialRecycle();
             if (self.properties.getPtr(key)) |prop| return prop;
             return null;
         }
@@ -314,6 +394,7 @@ pub fn ZObject(comptime T: type) type {
         /// you explicitly need "does *this* object (not its prototype) have
         /// the value", e.g. implementing hasOwnProperty-adjacent logic.
         pub fn getOwn(self: *const Self, key: []const u8) ?T {
+            if (self.cached_len > 0) @constCast(self).syncPartialRecycle();
             if (self.properties.get(key)) |prop| {
                 return prop.value;
             }
@@ -322,6 +403,7 @@ pub fn ZObject(comptime T: type) type {
 
         /// Delete property (labeled block example 2)
         pub fn delete(self: *Self, key: []const u8) errors_mod.ZObjectError!bool {
+            if (self.cached_len > 0) self.syncPartialRecycle();
             deleter: {
                 // Check if frozen
                 if (self.is_frozen) {
@@ -356,6 +438,7 @@ pub fn ZObject(comptime T: type) type {
 
         /// Check if property exists (own property only)
         pub fn hasOwnProperty(self: *const Self, key: []const u8) bool {
+            if (self.cached_len > 0) @constCast(self).syncPartialRecycle();
             return self.properties.contains(key);
         }
 
@@ -370,11 +453,13 @@ pub fn ZObject(comptime T: type) type {
 
         /// Get number of own properties
         pub fn size(self: *const Self) usize {
+            if (self.cached_len > 0) @constCast(self).syncPartialRecycle();
             return self.properties.count();
         }
 
         /// Clear all properties (labeled block example 3)
         pub fn clear(self: *Self) errors_mod.ZObjectError!void {
+            if (self.cached_len > 0) self.syncPartialRecycle();
             clearer: {
                 if (self.is_frozen) {
                     return errors_mod.ZObjectError.ObjectIsFrozen;
@@ -1106,10 +1191,58 @@ test "basic ZObject usage" {
 }
 
 test "is_error_data fits in ZObject padding without increasing @sizeOf" {
-    try std.testing.expectEqual(@as(usize, 72), @sizeOf(ZObject(u64)));
+    try std.testing.expectEqual(@as(usize, 80), @sizeOf(ZObject(u64)));
     var obj = ZObject(u64).init(std.testing.allocator);
     defer obj.deinit();
     try std.testing.expect(!obj.is_error_data);
     obj.is_error_data = true;
     try std.testing.expect(obj.is_error_data);
+}
+
+test "recyclePreserveShape and putBorrowedTransition" {
+    var obj = ZObject(i32).init(std.testing.allocator);
+    defer obj.deinit();
+
+    try obj.setBorrowedKey("x", 10);
+    try obj.setBorrowedKey("y", 20);
+    try obj.setBorrowedKey("z", 30);
+    try std.testing.expect(obj.canPreserveShape());
+
+    obj.recyclePreserveShape();
+    try std.testing.expectEqual(@as(u16, 3), obj.cached_len);
+    try std.testing.expectEqual(@as(u16, 0), obj.active_len);
+    try std.testing.expectEqual(@as(u32, 1), obj.shape_id);
+
+    const hit1 = try obj.putBorrowedTransition("x", 100, 0, 10);
+    try std.testing.expect(hit1);
+    try std.testing.expectEqual(@as(u16, 1), obj.active_len);
+
+    const hit2 = try obj.putBorrowedTransition("y", 200, 1, 20);
+    try std.testing.expect(hit2);
+    try std.testing.expectEqual(@as(u16, 2), obj.active_len);
+
+    const hit3 = try obj.putBorrowedTransition("z", 300, 2, 30);
+    try std.testing.expect(hit3);
+    try std.testing.expectEqual(@as(u16, 0), obj.cached_len);
+
+    try std.testing.expectEqual(@as(?i32, 100), obj.get("x"));
+    try std.testing.expectEqual(@as(?i32, 200), obj.get("y"));
+    try std.testing.expectEqual(@as(?i32, 300), obj.get("z"));
+}
+
+test "recyclePreserveShape partial sync on early read" {
+    var obj = ZObject(i32).init(std.testing.allocator);
+    defer obj.deinit();
+
+    try obj.setBorrowedKey("x", 10);
+    try obj.setBorrowedKey("y", 20);
+    try obj.setBorrowedKey("z", 30);
+
+    obj.recyclePreserveShape();
+    _ = try obj.putBorrowedTransition("x", 100, 0, 10);
+    const ks = try obj.keys(std.testing.allocator);
+    defer std.testing.allocator.free(ks);
+    try std.testing.expectEqual(@as(usize, 1), ks.len);
+    try std.testing.expectEqualStrings("x", ks[0]);
+    try std.testing.expectEqual(@as(?i32, null), obj.get("y"));
 }
