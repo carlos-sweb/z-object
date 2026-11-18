@@ -8,11 +8,20 @@ const errors_mod = @import("errors.zig");
 
 var global_shape_counter = std.atomic.Value(u32).init(2);
 
-/// Returns a globally unique, monotonically increasing shape ID (>= 2).
+/// Returns a globally unique, monotonically increasing non-structural shape ID (bit 31 = 1).
 /// Shape ID 1 is reserved for freshly initialized empty objects.
 pub fn nextGlobalShapeId() u32 {
     const id = global_shape_counter.fetchAdd(1, .monotonic);
-    return if (id <= 1) global_shape_counter.fetchAdd(2, .monotonic) else id;
+    return 0x8000_0000 | (id & 0x7FFF_FFFF);
+}
+
+fn mixStructuralShape(prev_shape: u32, key: []const u8, slot_idx: usize, flags: u8) u32 {
+    if ((prev_shape & 0x8000_0000) != 0) return nextGlobalShapeId();
+    const seed = @as(u64, prev_shape) ^ ((@as(u64, slot_idx) << 8) | flags);
+    const h = std.hash.Wyhash.hash(seed, key);
+    const folded: u32 = @truncate(h ^ (h >> 32));
+    const clean = folded & 0x7FFF_FFFF;
+    return if (clean <= 1) clean | 2 else clean;
 }
 
 /// Generic ECMAScript-compatible Object implementation
@@ -55,12 +64,31 @@ pub fn ZObject(comptime T: type) type {
 
         /// Deinitialize and free all resources
         pub fn deinit(self: *Self) void {
-            // Free all keys (strings are duplicated)
+            // Free all owned keys (borrowed keys live in external intern pool)
             var it = self.properties.iterator();
             while (it.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
+                if (!entry.value_ptr.descriptor.borrowed_key) {
+                    self.allocator.free(entry.key_ptr.*);
+                }
             }
             self.properties.deinit(self.allocator);
+        }
+
+        /// Clear all properties retaining capacity and resetting state flags.
+        pub fn clearRetainingCapacity(self: *Self) void {
+            var it = self.properties.iterator();
+            while (it.next()) |entry| {
+                if (!entry.value_ptr.descriptor.borrowed_key) {
+                    self.allocator.free(entry.key_ptr.*);
+                }
+            }
+            self.properties.clearRetainingCapacity();
+            self.prototype = null;
+            self.shape_id = 1;
+            self.is_frozen = false;
+            self.is_sealed = false;
+            self.is_extensible = true;
+            self.is_error_data = false;
         }
 
         /// ECMA-262 CanonicalNumericIndexString / array-index test: no sign,
@@ -126,12 +154,12 @@ pub fn ZObject(comptime T: type) type {
                 return;
             }
 
+            // Update existing property value in place (no key dupe, no shape_id bump for data update).
             const gop = try self.properties.getOrPut(self.allocator, key);
             if (gop.found_existing) {
                 if (!gop.value_ptr.descriptor.writable) {
                     return errors_mod.ZObjectError.PropertyNotWritable;
                 }
-                // Update existing property value in place (no key dupe, no shape_id bump for data update).
                 const was_accessor = gop.value_ptr.isAccessor();
                 gop.value_ptr.value = value;
                 gop.value_ptr.getter = null;
@@ -145,8 +173,74 @@ pub fn ZObject(comptime T: type) type {
                 };
                 gop.key_ptr.* = key_copy;
                 gop.value_ptr.* = property_mod.Property(T).init(value);
-                self.shape_id = nextGlobalShapeId();
+                self.shape_id = mixStructuralShape(self.shape_id, key, gop.index, 0b111);
             }
+        }
+
+        /// Fast-path property set using a caller-owned borrowed key whose lifetime
+        /// outlives this ZObject (e.g. an interned constant pool key). Skips key
+        /// allocation and pre-sizes empty objects to 4 slots.
+        pub fn setBorrowedKey(self: *Self, key: []const u8, value: T) errors_mod.ZObjectError!void {
+            if (self.is_frozen) {
+                return errors_mod.ZObjectError.ObjectIsFrozen;
+            }
+            if (!self.is_extensible) {
+                const prop = self.properties.getPtr(key) orelse return errors_mod.ZObjectError.ObjectNotExtensible;
+                if (!prop.descriptor.writable) {
+                    return errors_mod.ZObjectError.PropertyNotWritable;
+                }
+                const was_accessor = prop.isAccessor();
+                prop.value = value;
+                prop.getter = null;
+                prop.setter = null;
+                prop.descriptor.is_accessor = false;
+                if (was_accessor) self.shape_id = nextGlobalShapeId();
+                return;
+            }
+            if (self.properties.capacity() == 0) {
+                try self.properties.ensureTotalCapacity(self.allocator, 4);
+            }
+            const gop = try self.properties.getOrPut(self.allocator, key);
+            if (gop.found_existing) {
+                if (!gop.value_ptr.descriptor.writable) {
+                    return errors_mod.ZObjectError.PropertyNotWritable;
+                }
+                const was_accessor = gop.value_ptr.isAccessor();
+                gop.value_ptr.value = value;
+                gop.value_ptr.getter = null;
+                gop.value_ptr.setter = null;
+                gop.value_ptr.descriptor.is_accessor = false;
+                if (was_accessor) self.shape_id = nextGlobalShapeId();
+            } else {
+                gop.key_ptr.* = key;
+                gop.value_ptr.* = property_mod.Property(T).initWithDescriptor(value, .{
+                    .writable = true,
+                    .enumerable = true,
+                    .configurable = true,
+                    .borrowed_key = true,
+                });
+                self.shape_id = mixStructuralShape(self.shape_id, key, gop.index, 0b111);
+            }
+        }
+
+        /// Fast-path property insertion for transition ICs. If the object currently has
+        /// expected_slot properties, is not frozen/sealed, and extensible, appends the property
+        /// directly without rehashing/searching or recalculating shape_id.
+        pub fn putBorrowedTransition(self: *Self, key: []const u8, value: T, expected_slot: usize, next_shape: u32) errors_mod.ZObjectError!bool {
+            if (self.properties.count() != expected_slot or self.is_frozen or !self.is_extensible) {
+                return false;
+            }
+            if (expected_slot == 0) {
+                try self.properties.ensureTotalCapacity(self.allocator, 4);
+            }
+            try self.properties.putNoClobber(self.allocator, key, property_mod.Property(T).initWithDescriptor(value, .{
+                .writable = true,
+                .enumerable = true,
+                .configurable = true,
+                .borrowed_key = true,
+            }));
+            self.shape_id = next_shape;
+            return true;
         }
 
         /// Defines (or extends) a JS accessor property. Called once per
@@ -250,7 +344,9 @@ pub fn ZObject(comptime T: type) type {
             // Remove and free key (ordered: preserves the relative order of
             // surviving properties, per OrdinaryOwnPropertyKeys).
             if (self.properties.fetchOrderedRemove(key)) |removed| {
-                self.allocator.free(removed.key);
+                if (!removed.value.descriptor.borrowed_key) {
+                    self.allocator.free(removed.key);
+                }
                 self.shape_id = nextGlobalShapeId();
                 return true;
             }
@@ -298,7 +394,9 @@ pub fn ZObject(comptime T: type) type {
             // Free all keys
             var it = self.properties.iterator();
             while (it.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
+                if (!entry.value_ptr.descriptor.borrowed_key) {
+                    self.allocator.free(entry.key_ptr.*);
+                }
             }
 
             // Clear the map
@@ -602,7 +700,11 @@ pub fn ZObject(comptime T: type) type {
                     const key_copy = try self.allocator.dupe(u8, key);
                     gop.key_ptr.* = key_copy;
                     gop.value_ptr.* = property_mod.Property(T).initWithDescriptor(value, descriptor);
-                    self.shape_id = nextGlobalShapeId();
+                    const flags: u8 = @as(u8, @intFromBool(descriptor.writable)) |
+                        (@as(u8, @intFromBool(descriptor.enumerable)) << 1) |
+                        (@as(u8, @intFromBool(descriptor.configurable)) << 2) |
+                        (@as(u8, @intFromBool(descriptor.is_accessor)) << 3);
+                    self.shape_id = mixStructuralShape(self.shape_id, key, gop.index, flags);
                 }
             } else {
                 const prop_ptr = self.properties.getPtr(key) orelse {

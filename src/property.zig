@@ -3,11 +3,13 @@ const errors = @import("errors.zig");
 
 /// ECMAScript Property Descriptor
 /// Compacted to 4 bytes (eliminating legacy unused function/value pointers).
-pub const PropertyDescriptor = struct {
+pub const PropertyDescriptor = packed struct(u32) {
     writable: bool = true,
     enumerable: bool = true,
     configurable: bool = true,
     is_accessor: bool = false,
+    borrowed_key: bool = false,
+    _reserved: u27 = 0,
 
     /// Check if this is a data descriptor
     pub fn isDataDescriptor(self: *const PropertyDescriptor) bool {
